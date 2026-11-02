@@ -1,0 +1,13 @@
+[package]
+name = "man0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types, fixed-point arithmetic, hashing, metadata, events, and cross-contract interfaces for man0 NEAR programs"
+
+[dependencies]
+near-sdk = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
