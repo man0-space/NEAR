@@ -173,4 +173,85 @@ impl FactoryContract {
             metadata.unwrap_or_default(),
         )
     }
+
+    // =========================================================================
+    // Clone Engine
+    // =========================================================================
+
+    pub fn clone_agent(
+        &mut self,
+        original_agent_id: u64,
+        params: CloneParams,
+        uri: String,
+    ) -> u64 {
+        self.assert_not_paused();
+        validate_uri(&uri, true).unwrap_or_else(|e| e.panic());
+
+        let parent = self
+            .agents
+            .get(&original_agent_id)
+            .unwrap_or_else(|| Man0Error::AgentNotFound.panic())
+            .clone();
+
+        man0_require!(!parent.is_clone, Man0Error::CannotCloneAClone);
+        man0_require!(parent.cloneable, Man0Error::NotCloneable);
+
+        let caller = env::predecessor_account_id();
+        let clone_dna = derive_clone_dna(
+            &parent.dna_hash,
+            params.chain_id,
+            &params.model,
+            &caller,
+            env::block_timestamp(),
+        );
+        man0_require!(
+            !self.dna_to_agent.contains_key(&clone_dna),
+            Man0Error::DnaAlreadyRegistered
+        );
+
+        let mut extra_meta = Vec::with_capacity(2);
+        extra_meta.push(MetadataEntryInput {
+            key: "chainId".to_string(),
+            value: Base64VecU8(params.chain_id.to_string().into_bytes()),
+        });
+        extra_meta.push(MetadataEntryInput {
+            key: "model".to_string(),
+            value: Base64VecU8(params.model.clone().into_bytes()),
+        });
+
+        let cloned_agent_id = self.internal_create_agent(
+            clone_dna,
+            caller.clone(),
+            caller.clone(),
+            params.licenses,
+            params.license_price.0,
+            parent.creator_fee,
+            false,
+            true,
+            original_agent_id,
+            uri,
+            extra_meta,
+        );
+
+        let mut list = self
+            .clones_of
+            .get(&original_agent_id)
+            .cloned()
+            .unwrap_or_default();
+        list.push(cloned_agent_id);
+        self.clones_of.insert(original_agent_id, list);
+        self.total_clones = self.total_clones.saturating_add(1);
+
+        Man0Event::AgentCloned {
+            original_agent_id,
+            cloned_agent_id,
+            cloner: caller,
+            chain_id: params.chain_id,
+            model: params.model,
+            license_price: params.license_price,
+        }
+        .emit();
+
+        cloned_agent_id
+    }
 }
