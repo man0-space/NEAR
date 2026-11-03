@@ -326,4 +326,127 @@ impl FactoryContract {
 
         warped_agent_id
     }
+
+    pub fn record_unclaimed_warp_royalty(&mut self, warped_agent_id: u64, amount: U128) {
+        self.assert_authorized_consumer_or_admin();
+        let record = self
+            .warp_records
+            .get_mut(&warped_agent_id)
+            .unwrap_or_else(|| Man0Error::NotWarpedAgent.panic());
+        if record.original_creator.is_none()
+            && !record.royalties_claimed
+            && env::block_timestamp() <= record.royalty_expiry
+        {
+            record.accumulated_royalties = record
+                .accumulated_royalties
+                .checked_add(amount.0)
+                .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        }
+    }
+
+    pub fn transfer_unclaimed_royalties(
+        &mut self,
+        warped_agent_id: u64,
+        verified_creator: AccountId,
+    ) {
+        man0_require!(
+            env::predecessor_account_id() == self.treasury,
+            Man0Error::Unauthorized
+        );
+        let record = self
+            .warp_records
+            .get_mut(&warped_agent_id)
+            .unwrap_or_else(|| Man0Error::NotWarpedAgent.panic());
+
+        man0_require!(
+            record.original_creator.is_none(),
+            Man0Error::CreatorAlreadyKnown
+        );
+        man0_require!(
+            !record.royalties_claimed,
+            Man0Error::RoyaltiesAlreadyClaimed
+        );
+        man0_require!(
+            env::block_timestamp() <= record.royalty_expiry,
+            Man0Error::ClaimPeriodExpired
+        );
+
+        let amount = record.accumulated_royalties;
+        record.original_creator = Some(verified_creator.clone());
+        record.royalties_claimed = true;
+        record.accumulated_royalties = 0;
+
+        if amount > 0 {
+            if let Some(ref ft) = self.payment_token {
+                let _ = ext_ft::ext(ft.clone())
+                    .with_attached_deposit(NearToken::from_yoctonear(1))
+                    .with_static_gas(GAS_FOR_FT_TRANSFER)
+                    .ft_transfer(
+                        verified_creator.clone(),
+                        U128(amount),
+                        Some("Unclaimed warp royalties".to_string()),
+                    );
+            }
+        }
+
+        Man0Event::UnclaimedWarpRoyaltiesTransferred {
+            warped_agent_id,
+            verified_creator,
+            amount: U128(amount),
+        }
+        .emit();
+    }
+
+    pub fn get_warped_creator_split(
+        &self,
+        warped_agent_id: u64,
+        total_amount: U128,
+    ) -> WarpSplitView {
+        let record = self
+            .warp_records
+            .get(&warped_agent_id)
+            .unwrap_or_else(|| Man0Error::NotWarpedAgent.panic());
+
+        let total = total_amount.0;
+        let warper_amount = total
+            .checked_mul(WARP_WARPER_SHARE_BPS)
+            .unwrap()
+            / BPS_DENOMINATOR;
+        let creator_share = total
+            .checked_mul(WARP_CREATOR_SHARE_BPS)
+            .unwrap()
+            / BPS_DENOMINATOR;
+        let base_treasury = total
+            .saturating_sub(warper_amount)
+            .saturating_sub(creator_share);
+
+        if let Some(ref creator) = record.original_creator {
+            WarpSplitView {
+                warper: record.warper.clone(),
+                warper_amount: U128(warper_amount),
+                creator: Some(creator.clone()),
+                creator_amount: U128(creator_share),
+                treasury: self.treasury.clone(),
+                treasury_amount: U128(base_treasury),
+                unclaimed_creator_share: U128(0),
+            }
+        } else {
+            let unclaimed = if !record.royalties_claimed
+                && env::block_timestamp() <= record.royalty_expiry
+            {
+                creator_share
+            } else {
+                0
+            };
+            WarpSplitView {
+                warper: record.warper.clone(),
+                warper_amount: U128(warper_amount),
+                creator: None,
+                creator_amount: U128(0),
+                treasury: self.treasury.clone(),
+                treasury_amount: U128(base_treasury.saturating_add(creator_share)),
+                unclaimed_creator_share: U128(unclaimed),
+            }
+        }
+    }
 }
