@@ -254,4 +254,76 @@ impl FactoryContract {
 
         cloned_agent_id
     }
+
+    // =========================================================================
+    // Warp Engine
+    // =========================================================================
+
+    pub fn warp_agent(
+        &mut self,
+        original_hash: String,
+        original_creator: Option<AccountId>,
+        licenses: u64,
+        license_price: U128,
+        uri: String,
+    ) -> u64 {
+        self.assert_not_paused();
+        validate_uri(&uri, true).unwrap_or_else(|e| e.panic());
+
+        let parsed_orig = hex_to_bytes32(&original_hash).unwrap_or_else(|e| e.panic());
+        man0_require!(!is_zero_hash(&parsed_orig), Man0Error::ZeroOriginalHash);
+        man0_require!(
+            !self.original_hash_to_agent.contains_key(&parsed_orig),
+            Man0Error::AlreadyWarped
+        );
+
+        let warper = env::predecessor_account_id();
+        let now = env::block_timestamp();
+        let warp_dna = derive_warp_dna(&parsed_orig, &warper, now);
+        man0_require!(
+            !self.dna_to_agent.contains_key(&warp_dna),
+            Man0Error::DnaAlreadyRegistered
+        );
+
+        let warped_agent_id = self.internal_create_agent(
+            warp_dna,
+            warper.clone(),
+            warper.clone(),
+            licenses,
+            license_price.0,
+            1,
+            false,
+            false,
+            0,
+            uri,
+            Vec::new(),
+        );
+
+        let record = WarpRecord {
+            warped_agent_id,
+            original_hash: parsed_orig,
+            original_creator: original_creator.clone(),
+            warper: warper.clone(),
+            warped_at: now,
+            royalty_expiry: now.saturating_add(WARP_CLAIM_WINDOW_NS),
+            royalties_claimed: false,
+            accumulated_royalties: 0,
+        };
+        self.warp_records.insert(warped_agent_id, record);
+        self.original_hash_to_agent
+            .insert(parsed_orig, warped_agent_id);
+        self.total_warped = self.total_warped.saturating_add(1);
+
+        Man0Event::AgentWarped {
+            warped_agent_id,
+            original_hash: bytes32_to_hex(&parsed_orig),
+            original_creator,
+            warper,
+            licenses,
+            license_price,
+        }
+        .emit();
+
+        warped_agent_id
+    }
 }
