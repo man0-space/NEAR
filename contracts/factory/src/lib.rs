@@ -102,4 +102,75 @@ impl FactoryContract {
             authorized_consumers: IterableSet::new(StorageKey::AuthorizedConsumers),
         }
     }
+
+    // =========================================================================
+    // Agent Registration & Minting (ERC-8004)
+    // =========================================================================
+
+    pub fn mint_agent(
+        &mut self,
+        dna_hash: String,
+        licenses: u64,
+        license_price: U128,
+        creator_fee: Option<u64>,
+        cloneable: bool,
+        uri: String,
+        metadata: Option<Vec<MetadataEntryInput>>,
+    ) -> u64 {
+        self.assert_not_paused();
+        let parsed_dna = hex_to_bytes32(&dna_hash).unwrap_or_else(|e| e.panic());
+        man0_require!(!is_zero_hash(&parsed_dna), Man0Error::ZeroDnaHash);
+        man0_require!(
+            !self.dna_to_agent.contains_key(&parsed_dna),
+            Man0Error::DnaAlreadyRegistered
+        );
+        validate_uri(&uri, true).unwrap_or_else(|e| e.panic());
+
+        let caller = env::predecessor_account_id();
+        self.internal_create_agent(
+            parsed_dna,
+            caller.clone(),
+            caller,
+            licenses,
+            license_price.0,
+            creator_fee.unwrap_or(1),
+            cloneable,
+            false,
+            0,
+            uri,
+            metadata.unwrap_or_default(),
+        )
+    }
+
+    pub fn register_agent(
+        &mut self,
+        uri: Option<String>,
+        metadata: Option<Vec<MetadataEntryInput>>,
+    ) -> u64 {
+        self.assert_not_paused();
+        let uri_str = uri.unwrap_or_default();
+        validate_uri(&uri_str, true).unwrap_or_else(|e| e.panic());
+
+        let caller = env::predecessor_account_id();
+        let candidate_id = self.next_agent_id;
+        let dna = derive_registration_dna(&caller, &uri_str, candidate_id);
+        man0_require!(
+            !self.dna_to_agent.contains_key(&dna),
+            Man0Error::DnaAlreadyRegistered
+        );
+
+        self.internal_create_agent(
+            dna,
+            caller.clone(),
+            caller,
+            0,
+            0,
+            1,
+            false,
+            false,
+            0,
+            uri_str,
+            metadata.unwrap_or_default(),
+        )
+    }
 }
