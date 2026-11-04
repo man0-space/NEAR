@@ -587,4 +587,100 @@ impl FactoryContract {
         }
         .emit();
     }
+
+    // =========================================================================
+    // ERC-8004 Wallet & Metadata Management
+    // =========================================================================
+
+    pub fn set_agent_wallet(
+        &mut self,
+        agent_id: u64,
+        new_wallet: String,
+        deadline: Option<U64>,
+        signer_public_key: Option<Base64VecU8>,
+        signature: Option<Base64VecU8>,
+    ) {
+        self.assert_not_paused();
+        man0_require!(!new_wallet.trim().is_empty(), Man0Error::Unauthorized);
+
+        let caller = env::predecessor_account_id();
+        self.assert_owner_or_approved(agent_id, &caller);
+
+        let owner = self.agents.get(&agent_id).unwrap().owner.clone();
+
+        if let Some(dl) = deadline {
+            man0_require!(
+                env::block_timestamp() <= dl.0,
+                Man0Error::SignatureExpired
+            );
+        }
+
+        man0_require!(
+            signer_public_key.is_some() == signature.is_some(),
+            Man0Error::InvalidSignature
+        );
+
+        if let (Some(pk_bytes), Some(sig_bytes)) = (signer_public_key, signature) {
+            let dl_ns = deadline.map(|d| d.0).unwrap_or(u64::MAX);
+            man0_require!(
+                env::block_timestamp() <= dl_ns,
+                Man0Error::SignatureExpired
+            );
+            let pk_arr: [u8; 32] = pk_bytes
+                .0
+                .try_into()
+                .unwrap_or_else(|_| Man0Error::InvalidSignature.panic());
+            let sig_arr: [u8; 64] = sig_bytes
+                .0
+                .try_into()
+                .unwrap_or_else(|_| Man0Error::InvalidSignature.panic());
+            let msg_hash = derive_wallet_signing_hash(
+                &env::current_account_id(),
+                agent_id,
+                &owner,
+                &new_wallet,
+                dl_ns,
+            );
+            man0_require!(
+                env::ed25519_verify(&sig_arr, &msg_hash, &pk_arr),
+                Man0Error::InvalidSignature
+            );
+        }
+
+        let agent = self.agents.get_mut(&agent_id).unwrap();
+        agent.agent_wallet = Some(new_wallet.clone());
+
+        self.internal_set_metadata_raw(
+            agent_id,
+            RESERVED_KEY_AGENT_WALLET.to_string(),
+            new_wallet.as_bytes().to_vec(),
+        );
+
+        Man0Event::AgentWalletUpdated {
+            agent_id,
+            new_wallet,
+        }
+        .emit();
+    }
+
+    pub fn clear_agent_wallet(&mut self, agent_id: u64) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        self.assert_owner_or_approved(agent_id, &caller);
+
+        let agent = self.agents.get_mut(&agent_id).unwrap();
+        agent.agent_wallet = None;
+
+        self.internal_set_metadata_raw(
+            agent_id,
+            RESERVED_KEY_AGENT_WALLET.to_string(),
+            Vec::new(),
+        );
+
+        Man0Event::AgentWalletUpdated {
+            agent_id,
+            new_wallet: String::new(),
+        }
+        .emit();
+    }
 }
