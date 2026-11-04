@@ -768,4 +768,110 @@ impl FactoryContract {
             approved_account_ids: approvals,
         })
     }
+
+    #[payable]
+    pub fn nft_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: String,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+    ) {
+        self.assert_not_paused();
+        assert_at_least_one_yocto();
+        let id = Self::parse_token_id(&token_id);
+        let sender_id = env::predecessor_account_id();
+        self.internal_transfer(&sender_id, &receiver_id, id, approval_id, memo);
+    }
+
+    #[payable]
+    pub fn nft_transfer_call(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: String,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<bool> {
+        self.assert_not_paused();
+        assert_at_least_one_yocto();
+        let id = Self::parse_token_id(&token_id);
+        let sender_id = env::predecessor_account_id();
+        let (previous_owner, previous_approvals, previous_wallet) =
+            self.internal_transfer(&sender_id, &receiver_id, id, approval_id, memo);
+
+        let promise = ext_nft_receiver::ext(receiver_id.clone())
+            .with_static_gas(GAS_FOR_NFT_ON_TRANSFER)
+            .nft_on_transfer(sender_id, previous_owner.clone(), token_id.clone(), msg)
+            .then(
+                ext_nft_resolver::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_RESOLVE_TRANSFER)
+                    .nft_resolve_transfer(
+                        previous_owner,
+                        receiver_id,
+                        token_id,
+                        previous_approvals,
+                        previous_wallet,
+                    ),
+            );
+        PromiseOrValue::Promise(promise)
+    }
+
+    #[private]
+    pub fn nft_resolve_transfer(
+        &mut self,
+        previous_owner_id: AccountId,
+        receiver_id: AccountId,
+        token_id: String,
+        approved_account_ids: Option<HashMap<AccountId, u64>>,
+        previous_agent_wallet: Option<String>,
+    ) -> bool {
+        let must_revert = match env::promise_result_checked(0, 64) {
+            Ok(bytes) => serde_json::from_slice::<bool>(&bytes).unwrap_or(true),
+            Err(_) => true,
+        };
+
+        if !must_revert {
+            return true;
+        }
+
+        let id = Self::parse_token_id(&token_id);
+        if let Some(agent) = self.agents.get(&id) {
+            if agent.owner != receiver_id {
+                return true;
+            }
+        } else {
+            return true;
+        }
+
+        self.remove_token_from_owner(&receiver_id, id);
+        self.add_token_to_owner(&previous_owner_id, id);
+
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.owner = previous_owner_id.clone();
+            agent.agent_wallet = previous_agent_wallet.clone();
+        }
+        if let Some(approvals) = approved_account_ids {
+            self.token_approvals.insert(id, approvals);
+        }
+        let wallet_bytes = previous_agent_wallet
+            .unwrap_or_default()
+            .into_bytes();
+        self.internal_set_metadata_raw(
+            id,
+            RESERVED_KEY_AGENT_WALLET.to_string(),
+            wallet_bytes,
+        );
+
+        Nep171Event::NftTransfer {
+            authorized_id: None,
+            old_owner_id: receiver_id,
+            new_owner_id: previous_owner_id,
+            token_ids: vec![token_id],
+            memo: Some("revert".to_string()),
+        }
+        .emit();
+
+        false
+    }
 }
