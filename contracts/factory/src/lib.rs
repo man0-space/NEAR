@@ -449,4 +449,84 @@ impl FactoryContract {
             }
         }
     }
+
+    // =========================================================================
+    // License Management
+    // =========================================================================
+
+    pub fn consume_license(
+        &mut self,
+        agent_id: u64,
+        workflow_contract: AccountId,
+        workflow_id: u64,
+    ) -> AgentPermissionInfo {
+        self.assert_not_paused();
+        self.assert_authorized_consumer_or_admin();
+
+        let key = LicenseKey {
+            agent_id,
+            workflow_contract: workflow_contract.clone(),
+            workflow_id,
+        };
+        if let Some(existing) = self.licenses.get(&key) {
+            man0_require!(!existing.is_active, Man0Error::AlreadyLicensed);
+        }
+
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+
+        if agent.licenses > 0 {
+            man0_require!(
+                agent.licenses_minted < agent.licenses,
+                Man0Error::NoLicensesAvailable
+            );
+        }
+
+        agent.licenses_minted = agent
+            .licenses_minted
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+
+        let price = agent.license_price;
+        let owner = agent.owner.clone();
+        let creator = agent.creator.clone();
+        let wallet = agent.agent_wallet.clone().unwrap_or_default();
+
+        self.licenses.insert(
+            key,
+            LicenseRecord {
+                agent_id,
+                workflow_contract: workflow_contract.clone(),
+                workflow_id,
+                licensed_at: U64(env::block_timestamp()),
+                is_active: true,
+                price_paid: U128(price),
+            },
+        );
+
+        let warp_info = self.warp_records.get(&agent_id);
+        let is_warped = warp_info.is_some();
+        let warp_creator = warp_info.and_then(|w| w.original_creator.clone());
+
+        Man0Event::LicenseConsumed {
+            agent_id,
+            workflow_contract,
+            workflow_id,
+            price_paid: U128(price),
+        }
+        .emit();
+
+        AgentPermissionInfo {
+            exists: true,
+            owner,
+            creator,
+            agent_wallet: wallet,
+            is_approved_operator: false,
+            license_price: U128(price),
+            is_warped,
+            warp_creator,
+        }
+    }
 }
