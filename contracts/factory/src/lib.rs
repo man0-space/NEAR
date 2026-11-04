@@ -683,4 +683,89 @@ impl FactoryContract {
         }
         .emit();
     }
+
+    pub fn set_metadata(&mut self, agent_id: u64, key: String, value: Base64VecU8) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        self.assert_owner_or_approved(agent_id, &caller);
+        validate_user_metadata_entry(&key, &value.0).unwrap_or_else(|e| e.panic());
+
+        self.internal_set_metadata_raw(agent_id, key.clone(), value.0);
+        Man0Event::MetadataUpdated { agent_id, key }.emit();
+    }
+
+    pub fn remove_metadata(&mut self, agent_id: u64, key: String) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        self.assert_owner_or_approved(agent_id, &caller);
+        man0_require!(
+            key != RESERVED_KEY_AGENT_WALLET,
+            Man0Error::ReservedMetadataKey
+        );
+
+        let meta_key = AgentMetadataKey {
+            agent_id,
+            key: key.clone(),
+        };
+        man0_require!(
+            self.agent_metadata.remove(&meta_key).is_some(),
+            Man0Error::MetadataNotFound
+        );
+        if let Some(keys) = self.agent_metadata_keys.get_mut(&agent_id) {
+            keys.retain(|k| k != &key);
+        }
+        Man0Event::MetadataUpdated { agent_id, key }.emit();
+    }
+
+    // =========================================================================
+    // NEP-171 / NEP-177 / NEP-178 / NEP-181 Standard NFT Implementation
+    // =========================================================================
+
+    pub fn nft_metadata(&self) -> NFTContractMetadata {
+        NFTContractMetadata {
+            spec: "nft-1.0.0".to_string(),
+            name: "man0 Agents".to_string(),
+            symbol: "MAN0A".to_string(),
+            icon: None,
+            base_uri: None,
+            reference: None,
+            reference_hash: None,
+        }
+    }
+
+    pub fn nft_token(&self, token_id: String) -> Option<JsonToken> {
+        let id: u64 = token_id.parse().ok()?;
+        let agent = self.agents.get(&id)?;
+        let approvals = self
+            .token_approvals
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        Some(JsonToken {
+            token_id,
+            owner_id: agent.owner.clone(),
+            metadata: TokenMetadata {
+                title: Some(format!("man0 Agent #{}", id)),
+                description: Some(bytes32_to_hex(&agent.dna_hash)),
+                media: if agent.uri.is_empty() {
+                    None
+                } else {
+                    Some(agent.uri.clone())
+                },
+                copies: if agent.licenses == 0 {
+                    None
+                } else {
+                    Some(agent.licenses)
+                },
+                issued_at: Some(agent.created_at.to_string()),
+                reference: if agent.uri.is_empty() {
+                    None
+                } else {
+                    Some(agent.uri.clone())
+                },
+                ..Default::default()
+            },
+            approved_account_ids: approvals,
+        })
+    }
 }
