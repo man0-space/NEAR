@@ -529,4 +529,62 @@ impl FactoryContract {
             warp_creator,
         }
     }
+
+    pub fn revoke_license(
+        &mut self,
+        agent_id: u64,
+        workflow_contract: AccountId,
+        workflow_id: u64,
+    ) {
+        self.assert_not_paused();
+        self.assert_authorized_consumer_or_admin();
+
+        let key = LicenseKey {
+            agent_id,
+            workflow_contract: workflow_contract.clone(),
+            workflow_id,
+        };
+        let record = self
+            .licenses
+            .get_mut(&key)
+            .unwrap_or_else(|| Man0Error::LicenseNotFound.panic());
+        man0_require!(record.is_active, Man0Error::LicenseNotFound);
+        record.is_active = false;
+
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+        if agent.licenses_minted > 0 {
+            agent.licenses_minted -= 1;
+        }
+
+        Man0Event::LicenseRevoked {
+            agent_id,
+            workflow_contract,
+            workflow_id,
+        }
+        .emit();
+    }
+
+    pub fn update_price(&mut self, agent_id: u64, new_price: U128) {
+        self.assert_not_paused();
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+        man0_require!(
+            env::predecessor_account_id() == agent.creator,
+            Man0Error::Unauthorized
+        );
+        let old_price = agent.license_price;
+        agent.license_price = new_price.0;
+
+        Man0Event::PriceUpdated {
+            agent_id,
+            old_price: U128(old_price),
+            new_price,
+        }
+        .emit();
+    }
 }
