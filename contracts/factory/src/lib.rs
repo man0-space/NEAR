@@ -974,4 +974,47 @@ impl FactoryContract {
             None => true,
         }
     }
+
+    pub fn nft_total_supply(&self) -> U128 {
+        U128(self.total_agents as u128)
+    }
+
+    pub fn nft_tokens(&self, from_index: Option<U128>, limit: Option<u64>) -> Vec<JsonToken> {
+        let start = from_index.map(|i| i.0 as u64).unwrap_or(0);
+        let max = limit.unwrap_or(50).min(100);
+        let mut out = Vec::new();
+        let mut id = start.saturating_add(1);
+        while id < self.next_agent_id && (out.len() as u64) < max {
+            if let Some(tok) = self.nft_token(id.to_string()) {
+                out.push(tok);
+            }
+            id += 1;
+        }
+        out
+    }
+
+    pub fn nft_supply_for_owner(&self, account_id: AccountId) -> U128 {
+        self.tokens_per_owner
+            .get(&account_id)
+            .map(|s| U128(s.len() as u128))
+            .unwrap_or(U128(0))
+    }
+
+    pub fn nft_tokens_for_owner(
+        &self,
+        account_id: AccountId,
+        from_index: Option<U128>,
+        limit: Option<u64>,
+    ) -> Vec<JsonToken> {
+        let Some(set) = self.tokens_per_owner.get(&account_id) else {
+            return Vec::new();
+        };
+        let start = from_index.map(|i| i.0 as usize).unwrap_or(0);
+        let max = limit.unwrap_or(50).min(100) as usize;
+        set.iter()
+            .skip(start)
+            .take(max)
+            .filter_map(|id| self.nft_token(id.to_string()))
+            .collect()
+    }
 }
