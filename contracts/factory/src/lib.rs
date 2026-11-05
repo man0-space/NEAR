@@ -1059,4 +1059,136 @@ impl FactoryContract {
         self.assert_admin();
         self.paused = false;
     }
+
+    // =========================================================================
+    // View Methods
+    // =========================================================================
+
+    pub fn total_agents(&self) -> u64 {
+        self.total_agents
+    }
+
+    pub fn get_total_agents(&self) -> u64 {
+        self.total_agents
+    }
+
+    pub fn get_agent(&self, agent_id: u64) -> Option<AgentView> {
+        self.agents.get(&agent_id).map(|a| a.to_view())
+    }
+
+    pub fn get_agent_data(&self, agent_id: u64) -> Option<AgentView> {
+        self.get_agent(agent_id)
+    }
+
+    pub fn agent_uri(&self, agent_id: u64) -> Option<String> {
+        self.agents.get(&agent_id).map(|a| a.uri.clone())
+    }
+
+    pub fn get_agent_wallet(&self, agent_id: u64) -> String {
+        self.agents
+            .get(&agent_id)
+            .and_then(|a| a.agent_wallet.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn get_agent_permissions(
+        &self,
+        agent_id: u64,
+        candidate: AccountId,
+    ) -> Option<AgentPermissionInfo> {
+        let agent = self.agents.get(&agent_id)?;
+        let is_approved = self
+            .token_approvals
+            .get(&agent_id)
+            .map(|m| m.contains_key(&candidate))
+            .unwrap_or(false);
+        let warp_info = self.warp_records.get(&agent_id);
+        Some(AgentPermissionInfo {
+            exists: true,
+            owner: agent.owner.clone(),
+            creator: agent.creator.clone(),
+            agent_wallet: agent.agent_wallet.clone().unwrap_or_default(),
+            is_approved_operator: is_approved,
+            license_price: U128(agent.license_price),
+            is_warped: warp_info.is_some(),
+            warp_creator: warp_info.and_then(|w| w.original_creator.clone()),
+        })
+    }
+
+    pub fn get_metadata(&self, agent_id: u64, key: String) -> Option<Base64VecU8> {
+        self.agent_metadata
+            .get(&AgentMetadataKey { agent_id, key })
+            .cloned()
+            .map(Base64VecU8)
+    }
+
+    pub fn get_metadata_keys(&self, agent_id: u64) -> Vec<String> {
+        self.agent_metadata_keys
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn is_dna_registered(&self, dna_hash: String) -> bool {
+        let Ok(parsed) = hex_to_bytes32(&dna_hash) else {
+            return false;
+        };
+        self.dna_to_agent.contains_key(&parsed)
+    }
+
+    pub fn get_agent_by_dna(&self, dna_hash: String) -> u64 {
+        let Ok(parsed) = hex_to_bytes32(&dna_hash) else {
+            return 0;
+        };
+        self.dna_to_agent.get(&parsed).copied().unwrap_or(0)
+    }
+
+    pub fn get_remaining_licenses(&self, agent_id: u64) -> u64 {
+        let Some(agent) = self.agents.get(&agent_id) else {
+            return 0;
+        };
+        if agent.licenses == 0 {
+            u64::MAX
+        } else {
+            agent.licenses.saturating_sub(agent.licenses_minted)
+        }
+    }
+
+    pub fn has_active_license(
+        &self,
+        agent_id: u64,
+        workflow_contract: AccountId,
+        workflow_id: u64,
+    ) -> bool {
+        self.licenses
+            .get(&LicenseKey {
+                agent_id,
+                workflow_contract,
+                workflow_id,
+            })
+            .map(|r| r.is_active)
+            .unwrap_or(false)
+    }
+
+    pub fn get_license(
+        &self,
+        agent_id: u64,
+        workflow_contract: AccountId,
+        workflow_id: u64,
+    ) -> Option<LicenseRecord> {
+        self.licenses
+            .get(&LicenseKey {
+                agent_id,
+                workflow_contract,
+                workflow_id,
+            })
+            .cloned()
+    }
+
+    pub fn can_clone(&self, agent_id: u64) -> bool {
+        self.agents
+            .get(&agent_id)
+            .map(|a| a.cloneable && !a.is_clone)
+            .unwrap_or(false)
+    }
 }
