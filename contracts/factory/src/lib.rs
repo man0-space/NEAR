@@ -1191,4 +1191,59 @@ impl FactoryContract {
             .map(|a| a.cloneable && !a.is_clone)
             .unwrap_or(false)
     }
+
+    pub fn get_clones_of(&self, agent_id: u64) -> Vec<u64> {
+        self.clones_of.get(&agent_id).cloned().unwrap_or_default()
+    }
+
+    pub fn get_original_agent(&self, cloned_agent_id: u64) -> u64 {
+        self.agents
+            .get(&cloned_agent_id)
+            .map(|a| a.parent_agent_id)
+            .unwrap_or(0)
+    }
+
+    pub fn total_clones(&self) -> u64 {
+        self.total_clones
+    }
+
+    pub fn is_warped(&self, original_hash: String) -> bool {
+        let Ok(parsed) = hex_to_bytes32(&original_hash) else {
+            return false;
+        };
+        self.original_hash_to_agent.contains_key(&parsed)
+    }
+
+    pub fn get_warp_record(&self, warped_agent_id: u64) -> Option<WarpRecordView> {
+        self.warp_records
+            .get(&warped_agent_id)
+            .map(|r| r.to_view())
+    }
+
+    pub fn get_warped_agent_id(&self, original_hash: String) -> u64 {
+        let Ok(parsed) = hex_to_bytes32(&original_hash) else {
+            return 0;
+        };
+        self.original_hash_to_agent.get(&parsed).copied().unwrap_or(0)
+    }
+
+    pub fn total_warped(&self) -> u64 {
+        self.total_warped
+    }
+
+    pub fn get_admin(&self) -> AccountId {
+        self.admin.clone()
+    }
+
+    pub fn get_treasury(&self) -> AccountId {
+        self.treasury.clone()
+    }
+
+    pub fn get_payment_token(&self) -> Option<AccountId> {
+        self.payment_token.clone()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
 }
