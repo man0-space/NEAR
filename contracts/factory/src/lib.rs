@@ -1246,4 +1246,156 @@ impl FactoryContract {
     pub fn is_paused(&self) -> bool {
         self.paused
     }
+
+    // =========================================================================
+    // Internal Helpers
+    // =========================================================================
+
+    fn assert_admin(&self) {
+        man0_require!(
+            env::predecessor_account_id() == self.admin,
+            Man0Error::Unauthorized
+        );
+    }
+
+    fn assert_not_paused(&self) {
+        man0_require!(!self.paused, Man0Error::Paused);
+    }
+
+    fn assert_authorized_consumer_or_admin(&self) {
+        let caller = env::predecessor_account_id();
+        man0_require!(
+            caller == self.admin || self.authorized_consumers.contains(&caller),
+            Man0Error::Unauthorized
+        );
+    }
+
+    fn assert_owner_or_approved(&self, agent_id: u64, caller: &AccountId) {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+        if &agent.owner == caller {
+            return;
+        }
+        let approved = self
+            .token_approvals
+            .get(&agent_id)
+            .map(|m| m.contains_key(caller))
+            .unwrap_or(false);
+        man0_require!(approved, Man0Error::Unauthorized);
+    }
+
+    fn parse_token_id(token_id: &str) -> u64 {
+        token_id
+            .parse::<u64>()
+            .unwrap_or_else(|_| Man0Error::AgentNotFound.panic())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn internal_create_agent(
+        &mut self,
+        dna_hash: [u8; 32],
+        owner: AccountId,
+        creator: AccountId,
+        licenses: u64,
+        license_price: u128,
+        creator_fee: u64,
+        cloneable: bool,
+        is_clone: bool,
+        parent_agent_id: u64,
+        uri: String,
+        metadata: Vec<MetadataEntryInput>,
+    ) -> u64 {
+        man0_require!(
+            metadata.len() <= MAX_METADATA_ENTRIES,
+            Man0Error::TooManyMetadataEntries
+        );
+        for entry in &metadata {
+            validate_user_metadata_entry(&entry.key, &entry.value.0)
+                .unwrap_or_else(|e| e.panic());
+        }
+
+        let agent_id = self.next_agent_id;
+        self.next_agent_id = self
+            .next_agent_id
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        self.total_agents = self
+            .total_agents
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+
+        let wallet_str = owner.to_string();
+        let record = AgentRecord {
+            agent_id,
+            dna_hash,
+            owner: owner.clone(),
+            creator: creator.clone(),
+            licenses,
+            licenses_minted: 0,
+            license_price,
+            creator_fee,
+            cloneable,
+            is_clone,
+            parent_agent_id,
+            agent_wallet: Some(wallet_str.clone()),
+            uri: uri.clone(),
+            created_at: env::block_timestamp(),
+        };
+
+        self.agents.insert(agent_id, record);
+        self.dna_to_agent.insert(dna_hash, agent_id);
+        self.add_token_to_owner(&owner, agent_id);
+
+        // Set default reserved metadata: agentWallet = owner
+        self.internal_set_metadata_raw(
+            agent_id,
+            RESERVED_KEY_AGENT_WALLET.to_string(),
+            wallet_str.into_bytes(),
+        );
+
+        for entry in metadata {
+            self.internal_set_metadata_raw(agent_id, entry.key, entry.value.0);
+        }
+
+        Nep171Event::NftMint {
+            owner_id: owner.clone(),
+            token_ids: vec![agent_id.to_string()],
+            memo: None,
+        }
+        .emit();
+
+        Man0Event::AgentRegistered {
+            agent_id,
+            owner,
+            creator,
+            dna_hash: bytes32_to_hex(&dna_hash),
+            licenses,
+            license_price: U128(license_price),
+            cloneable,
+            uri,
+        }
+        .emit();
+
+        agent_id
+    }
+
+    fn internal_set_metadata_raw(&mut self, agent_id: u64, key: String, value: Vec<u8>) {
+        let mut keys = self
+            .agent_metadata_keys
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_default();
+        if !keys.contains(&key) {
+            man0_require!(
+                keys.len() < MAX_METADATA_ENTRIES + 1,
+                Man0Error::TooManyMetadataEntries
+            );
+            keys.push(key.clone());
+            self.agent_metadata_keys.insert(agent_id, keys);
+        }
+        self.agent_metadata
+            .insert(AgentMetadataKey { agent_id, key }, value);
+    }
 }
