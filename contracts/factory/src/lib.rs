@@ -1017,4 +1017,46 @@ impl FactoryContract {
             .filter_map(|id| self.nft_token(id.to_string()))
             .collect()
     }
+
+    // =========================================================================
+    // Admin & Configuration
+    // =========================================================================
+
+    pub fn set_authorized_consumer(&mut self, consumer: AccountId, authorized: bool) {
+        self.assert_admin();
+        if authorized {
+            self.authorized_consumers.insert(consumer);
+        } else {
+            self.authorized_consumers.remove(&consumer);
+        }
+    }
+
+    pub fn is_authorized_consumer(&self, consumer: AccountId) -> bool {
+        self.authorized_consumers.contains(&consumer)
+    }
+
+    pub fn set_treasury(&mut self, new_treasury: AccountId) {
+        self.assert_admin();
+        self.treasury = new_treasury;
+    }
+
+    pub fn set_payment_token(&mut self, new_token: Option<AccountId>) {
+        self.assert_admin();
+        self.payment_token = new_token;
+    }
+
+    pub fn transfer_admin(&mut self, new_admin: AccountId) {
+        self.assert_admin();
+        self.admin = new_admin;
+    }
+
+    pub fn pause(&mut self) {
+        self.assert_admin();
+        self.paused = true;
+    }
+
+    pub fn unpause(&mut self) {
+        self.assert_admin();
+        self.paused = false;
+    }
 }
