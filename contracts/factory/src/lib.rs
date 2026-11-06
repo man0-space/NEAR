@@ -1727,4 +1727,85 @@ mod tests {
             "ipfs://c2".to_string(),
         );
     }
+
+    #[test]
+    fn test_warp_agent_royalty_splits_and_claim_window() {
+        let admin = acc("admin.testnet");
+        let treasury = acc("treasury.testnet");
+        let warper = acc("warper.testnet");
+        let verified_creator = acc("creator.testnet");
+
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), treasury.clone(), None);
+
+        // Warp with unknown original creator
+        setup_ctx(&warper, 0, 10_000);
+        let warped_id = contract.warp_agent(
+            sample_dna(0x77),
+            None,
+            100,
+            U128(200_000),
+            "ipfs://warped".to_string(),
+        );
+        assert!(contract.is_warped(sample_dna(0x77)));
+        assert_eq!(contract.get_warped_agent_id(sample_dna(0x77)), warped_id);
+        assert_eq!(contract.total_warped(), 1);
+
+        // 80% warper, 20% treasury (with 10% tracked as unclaimed creator share)
+        let split = contract.get_warped_creator_split(warped_id, U128(1_000));
+        assert_eq!(split.warper_amount, U128(800));
+        assert_eq!(split.creator_amount, U128(0));
+        assert_eq!(split.treasury_amount, U128(200));
+        assert_eq!(split.unclaimed_creator_share, U128(100));
+
+        // Admin records unclaimed royalty
+        setup_ctx(&admin, 0, 20_000);
+        contract.record_unclaimed_warp_royalty(warped_id, U128(100));
+        assert_eq!(
+            contract
+                .get_warp_record(warped_id)
+                .unwrap()
+                .accumulated_royalties,
+            U128(100)
+        );
+
+        // Treasury transfers unclaimed royalties to verified creator before expiry
+        setup_ctx(&treasury, 0, 30_000);
+        contract.transfer_unclaimed_royalties(warped_id, verified_creator.clone());
+
+        let rec = contract.get_warp_record(warped_id).unwrap();
+        assert_eq!(rec.original_creator, Some(verified_creator.clone()));
+        assert!(rec.royalties_claimed);
+        assert_eq!(rec.accumulated_royalties, U128(0));
+
+        // Now split gives 80% warper, 10% verified_creator, 10% treasury
+        let split_after = contract.get_warped_creator_split(warped_id, U128(1_000));
+        assert_eq!(split_after.warper_amount, U128(800));
+        assert_eq!(split_after.creator_amount, U128(100));
+        assert_eq!(split_after.treasury_amount, U128(100));
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_CLAIM_PERIOD_EXPIRED")]
+    fn test_warp_claim_after_365_days_fails() {
+        let admin = acc("admin.testnet");
+        let treasury = acc("treasury.testnet");
+        let warper = acc("warper.testnet");
+
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin, treasury.clone(), None);
+
+        setup_ctx(&warper, 0, 1_000);
+        let warped_id = contract.warp_agent(
+            sample_dna(0x88),
+            None,
+            10,
+            U128(100),
+            "ipfs://w".to_string(),
+        );
+
+        // Fast-forward past 365 days
+        setup_ctx(&treasury, 0, 1_000 + WARP_CLAIM_WINDOW_NS + 1);
+        contract.transfer_unclaimed_royalties(warped_id, acc("late.testnet"));
+    }
 }
