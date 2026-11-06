@@ -1398,4 +1398,85 @@ impl FactoryContract {
         self.agent_metadata
             .insert(AgentMetadataKey { agent_id, key }, value);
     }
+
+    fn add_token_to_owner(&mut self, owner: &AccountId, agent_id: u64) {
+        if !self.tokens_per_owner.contains_key(owner) {
+            let set_key = StorageKey::OwnerSet {
+                account_hash: env::sha256_array(owner.as_bytes()),
+            };
+            self.tokens_per_owner
+                .insert(owner.clone(), IterableSet::new(set_key));
+        }
+        if let Some(set) = self.tokens_per_owner.get_mut(owner) {
+            set.insert(agent_id);
+        }
+    }
+
+    fn remove_token_from_owner(&mut self, owner: &AccountId, agent_id: u64) {
+        if let Some(set) = self.tokens_per_owner.get_mut(owner) {
+            set.remove(&agent_id);
+        }
+    }
+
+    fn internal_transfer(
+        &mut self,
+        sender_id: &AccountId,
+        receiver_id: &AccountId,
+        agent_id: u64,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+    ) -> (AccountId, Option<HashMap<AccountId, u64>>, Option<String>) {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+        let previous_owner = agent.owner.clone();
+        let previous_wallet = agent.agent_wallet.clone();
+
+        man0_require!(&previous_owner != receiver_id, Man0Error::Unauthorized);
+
+        let is_owner = sender_id == &previous_owner;
+        if !is_owner {
+            let approvals = self
+                .token_approvals
+                .get(&agent_id)
+                .unwrap_or_else(|| Man0Error::Unauthorized.panic());
+            let &stored_approval_id = approvals
+                .get(sender_id)
+                .unwrap_or_else(|| Man0Error::Unauthorized.panic());
+            if let Some(expected) = approval_id {
+                man0_require!(stored_approval_id == expected, Man0Error::Unauthorized);
+            }
+        }
+
+        let previous_approvals = self.token_approvals.remove(&agent_id);
+        self.remove_token_from_owner(&previous_owner, agent_id);
+        self.add_token_to_owner(receiver_id, agent_id);
+
+        // ERC-8004 invariant: transferring an agent clears `agent_wallet`
+        let agent_mut = self.agents.get_mut(&agent_id).unwrap();
+        agent_mut.owner = receiver_id.clone();
+        agent_mut.agent_wallet = None;
+
+        self.internal_set_metadata_raw(
+            agent_id,
+            RESERVED_KEY_AGENT_WALLET.to_string(),
+            Vec::new(),
+        );
+
+        Nep171Event::NftTransfer {
+            authorized_id: if is_owner {
+                None
+            } else {
+                Some(sender_id.clone())
+            },
+            old_owner_id: previous_owner.clone(),
+            new_owner_id: receiver_id.clone(),
+            token_ids: vec![agent_id.to_string()],
+            memo,
+        }
+        .emit();
+
+        (previous_owner, previous_approvals, previous_wallet)
+    }
 }
