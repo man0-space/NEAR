@@ -1808,4 +1808,129 @@ mod tests {
         setup_ctx(&treasury, 0, 1_000 + WARP_CLAIM_WINDOW_NS + 1);
         contract.transfer_unclaimed_royalties(warped_id, acc("late.testnet"));
     }
+
+    #[test]
+    fn test_license_consumption_exhaustion_and_revocation() {
+        let admin = acc("admin.testnet");
+        let wf = acc("workflow.testnet");
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), acc("treasury.testnet"), None);
+        contract.set_authorized_consumer(wf.clone(), true);
+
+        setup_ctx(&alice, 0, 2_000);
+        let id = contract.mint_agent(
+            sample_dna(0x99),
+            1, // only 1 license available
+            U128(250_000),
+            None,
+            false,
+            "ipfs://limited".to_string(),
+            None,
+        );
+        assert_eq!(contract.get_remaining_licenses(id), 1);
+
+        setup_ctx(&wf, 0, 3_000);
+        let info = contract.consume_license(id, wf.clone(), 101);
+        assert_eq!(info.license_price, U128(250_000));
+        assert!(contract.has_active_license(id, wf.clone(), 101));
+        assert_eq!(contract.get_remaining_licenses(id), 0);
+
+        // Revoke license frees the slot
+        contract.revoke_license(id, wf.clone(), 101);
+        assert!(!contract.has_active_license(id, wf.clone(), 101));
+        assert_eq!(contract.get_remaining_licenses(id), 1);
+
+        // Re-consuming for same workflow now succeeds
+        contract.consume_license(id, wf.clone(), 101);
+        assert_eq!(contract.get_remaining_licenses(id), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NO_LICENSES_AVAILABLE")]
+    fn test_consume_license_when_exhausted_panics() {
+        let admin = acc("admin.testnet");
+        let wf = acc("workflow.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), acc("treasury.testnet"), None);
+        contract.set_authorized_consumer(wf.clone(), true);
+
+        let id = contract.mint_agent(
+            sample_dna(0xaa),
+            1,
+            U128(100),
+            None,
+            false,
+            "ipfs://one".to_string(),
+            None,
+        );
+
+        setup_ctx(&wf, 0, 2_000);
+        contract.consume_license(id, wf.clone(), 1);
+        contract.consume_license(id, wf, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ALREADY_LICENSED")]
+    fn test_consume_license_duplicate_same_workflow_panics() {
+        let admin = acc("admin.testnet");
+        let wf = acc("workflow.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), acc("treasury.testnet"), None);
+        contract.set_authorized_consumer(wf.clone(), true);
+        let id = contract.mint_agent(
+            sample_dna(0xab),
+            10,
+            U128(100),
+            None,
+            false,
+            "ipfs://ten".to_string(),
+            None,
+        );
+        setup_ctx(&wf, 0, 2_000);
+        contract.consume_license(id, wf.clone(), 42);
+        contract.consume_license(id, wf, 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_UNAUTHORIZED")]
+    fn test_consume_license_unauthorized_caller_panics() {
+        let admin = acc("admin.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin, acc("treasury.testnet"), None);
+        let id = contract.register_agent(Some("ipfs://a".to_string()), None);
+
+        let attacker = acc("attacker.testnet");
+        setup_ctx(&attacker, 0, 2_000);
+        contract.consume_license(id, attacker, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_UNAUTHORIZED")]
+    fn test_update_price_only_creator_even_after_nft_transfer() {
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        setup_ctx(&alice, 1, 1_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let id = contract.mint_agent(
+            sample_dna(0xac),
+            10,
+            U128(100),
+            None,
+            false,
+            "ipfs://a".to_string(),
+            None,
+        );
+        contract.nft_transfer(bob.clone(), id.to_string(), None, None);
+
+        // Alice is still creator and can update price
+        setup_ctx(&alice, 0, 2_000);
+        contract.update_price(id, U128(200));
+        assert_eq!(contract.get_agent(id).unwrap().license_price, U128(200));
+
+        // Bob is new owner, NOT creator -> must panic
+        setup_ctx(&bob, 0, 3_000);
+        contract.update_price(id, U128(300));
+    }
 }
