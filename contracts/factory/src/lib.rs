@@ -1480,3 +1480,142 @@ impl FactoryContract {
         (previous_owner, previous_approvals, previous_wallet)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    fn acc(name: &str) -> AccountId {
+        name.parse().unwrap()
+    }
+
+    fn setup_ctx(predecessor: &AccountId, deposit_yocto: u128, timestamp_ns: u64) {
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("factory.testnet"))
+            .predecessor_account_id(predecessor.clone())
+            .signer_account_id(predecessor.clone())
+            .attached_deposit(NearToken::from_yoctonear(deposit_yocto))
+            .block_timestamp(timestamp_ns);
+        testing_env!(builder.build());
+    }
+
+    fn sample_dna(byte: u8) -> String {
+        bytes32_to_hex(&[byte; 32])
+    }
+
+    #[test]
+    fn test_mint_and_register_agent_happy_path() {
+        let admin = acc("admin.testnet");
+        let treasury = acc("treasury.testnet");
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin, treasury, None);
+
+        setup_ctx(&alice, 0, 2_000);
+        let id1 = contract.mint_agent(
+            sample_dna(0x11),
+            100,
+            U128(500_000),
+            Some(5),
+            true,
+            "ipfs://agent1".to_string(),
+            Some(vec![MetadataEntryInput {
+                key: "framework".to_string(),
+                value: Base64VecU8(b"man0".to_vec()),
+            }]),
+        );
+        assert_eq!(id1, 1);
+        assert_eq!(contract.total_agents(), 1);
+        assert!(contract.is_dna_registered(sample_dna(0x11)));
+        assert_eq!(contract.get_agent_by_dna(sample_dna(0x11)), 1);
+
+        let view = contract.get_agent(1).unwrap();
+        assert_eq!(view.owner, alice);
+        assert_eq!(view.creator, alice);
+        assert_eq!(view.licenses, 100);
+        assert_eq!(view.license_price, U128(500_000));
+        assert_eq!(view.creator_fee, 5);
+        assert!(view.cloneable);
+        assert_eq!(view.agent_wallet, "alice.testnet");
+        assert_eq!(view.uri, "ipfs://agent1");
+
+        // Verify default agentWallet metadata
+        assert_eq!(
+            contract
+                .get_metadata(1, "agentWallet".to_string())
+                .unwrap()
+                .0,
+            b"alice.testnet".to_vec()
+        );
+        assert_eq!(
+            contract.get_metadata(1, "framework".to_string()).unwrap().0,
+            b"man0".to_vec()
+        );
+
+        // Simple register_agent with no URI
+        let id2 = contract.register_agent(None, None);
+        assert_eq!(id2, 2);
+        assert_eq!(contract.get_remaining_licenses(2), u64::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ZERO_DNA_HASH")]
+    fn test_mint_agent_rejects_zero_dna() {
+        let admin = acc("admin.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), acc("treasury.testnet"), None);
+        contract.mint_agent(
+            sample_dna(0x00),
+            10,
+            U128(100),
+            None,
+            false,
+            "ipfs://zero".to_string(),
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_DNA_ALREADY_REGISTERED")]
+    fn test_mint_agent_rejects_duplicate_dna() {
+        let admin = acc("admin.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), acc("treasury.testnet"), None);
+        contract.mint_agent(
+            sample_dna(0x22),
+            10,
+            U128(100),
+            None,
+            false,
+            "ipfs://1".to_string(),
+            None,
+        );
+        contract.mint_agent(
+            sample_dna(0x22),
+            20,
+            U128(200),
+            None,
+            false,
+            "ipfs://2".to_string(),
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_RESERVED_METADATA_KEY")]
+    fn test_set_metadata_rejects_reserved_agent_wallet_key() {
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 1_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let id = contract.register_agent(Some("ipfs://a".to_string()), None);
+        contract.set_metadata(
+            id,
+            "agentWallet".to_string(),
+            Base64VecU8(b"hacker.testnet".to_vec()),
+        );
+    }
+}
