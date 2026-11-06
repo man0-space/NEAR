@@ -1618,4 +1618,113 @@ mod tests {
             Base64VecU8(b"hacker.testnet".to_vec()),
         );
     }
+
+    #[test]
+    fn test_nft_transfer_resets_agent_wallet_and_approvals() {
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        let operator = acc("operator.testnet");
+
+        setup_ctx(&alice, 1, 1_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let id = contract.register_agent(Some("ipfs://nft".to_string()), None);
+
+        contract.set_agent_wallet(id, "custom-wallet.testnet".to_string(), None, None, None);
+        assert_eq!(contract.get_agent_wallet(id), "custom-wallet.testnet");
+
+        contract.nft_approve(id.to_string(), operator.clone(), None);
+        assert!(contract.nft_is_approved(id.to_string(), operator.clone(), None));
+
+        // Transfer via approved operator
+        setup_ctx(&operator, 1, 2_000);
+        contract.nft_transfer(bob.clone(), id.to_string(), None, None);
+
+        let updated = contract.get_agent(id).unwrap();
+        assert_eq!(updated.owner, bob);
+        assert_eq!(updated.agent_wallet, "");
+        assert!(!contract.nft_is_approved(id.to_string(), operator, None));
+        assert_eq!(
+            contract.nft_supply_for_owner(alice),
+            U128(0)
+        );
+        assert_eq!(
+            contract.nft_supply_for_owner(bob),
+            U128(1)
+        );
+    }
+
+    #[test]
+    fn test_clone_agent_and_prevent_clone_of_clone() {
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        setup_ctx(&alice, 0, 1_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+
+        let orig = contract.mint_agent(
+            sample_dna(0x33),
+            50,
+            U128(1_000_000),
+            Some(10),
+            true,
+            "ipfs://orig".to_string(),
+            None,
+        );
+        assert!(contract.can_clone(orig));
+
+        setup_ctx(&bob, 0, 5_000);
+        let cloned = contract.clone_agent(
+            orig,
+            CloneParams {
+                chain_id: 397,
+                license_price: U128(400_000),
+                model: "deepseek-r2".to_string(),
+                licenses: 25,
+            },
+            "ipfs://cloned".to_string(),
+        );
+        assert_eq!(cloned, 2);
+        assert!(!contract.can_clone(cloned));
+        assert_eq!(contract.get_original_agent(cloned), orig);
+        assert_eq!(contract.get_clones_of(orig), vec![cloned]);
+        assert_eq!(contract.total_clones(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_CANNOT_CLONE_A_CLONE")]
+    fn test_cannot_clone_a_clone() {
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 1_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let orig = contract.mint_agent(
+            sample_dna(0x44),
+            10,
+            U128(100),
+            None,
+            true,
+            "ipfs://orig".to_string(),
+            None,
+        );
+        let c1 = contract.clone_agent(
+            orig,
+            CloneParams {
+                chain_id: 1,
+                license_price: U128(50),
+                model: "m1".to_string(),
+                licenses: 5,
+            },
+            "ipfs://c1".to_string(),
+        );
+        // Cloning a clone must panic
+        let _ = self::FactoryContract::clone_agent(
+            &mut contract,
+            c1,
+            CloneParams {
+                chain_id: 1,
+                license_price: U128(50),
+                model: "m2".to_string(),
+                licenses: 5,
+            },
+            "ipfs://c2".to_string(),
+        );
+    }
 }
