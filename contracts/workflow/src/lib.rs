@@ -377,4 +377,73 @@ impl WorkflowContract {
         }
         .emit();
     }
+
+    pub fn reject_child(
+        &mut self,
+        parent_id: u64,
+        index: u64,
+        child_contract: AccountId,
+        child_id: u64,
+    ) {
+        self.assert_not_paused();
+        let root_owner = self.owner_of(parent_id);
+        man0_require!(
+            env::predecessor_account_id() == root_owner,
+            Man0Error::Unauthorized
+        );
+
+        let pending = self
+            .pending_children
+            .get_mut(&parent_id)
+            .unwrap_or_else(|| Man0Error::PendingChildMismatch.panic());
+        let idx = index as usize;
+        man0_require!(idx < pending.len(), Man0Error::PendingChildMismatch);
+        let expected = Child {
+            contract_id: child_contract.clone(),
+            token_id: child_id,
+        };
+        man0_require!(pending[idx] == expected, Man0Error::PendingChildMismatch);
+        pending.remove(idx);
+
+        if child_contract == env::current_account_id() {
+            if let Some(wf) = self.workflows.get(&child_id) {
+                let creator = wf.creator.clone();
+                self.direct_owners.insert(
+                    child_id,
+                    DirectOwner {
+                        owner_id: creator,
+                        parent_token_id: 0,
+                        is_nft: false,
+                    },
+                );
+            }
+        }
+
+        Man0Event::ChildRejected {
+            parent_token_id: parent_id,
+            child_contract,
+            child_token_id: child_id,
+        }
+        .emit();
+    }
+
+    pub fn reject_all_children(&mut self, parent_id: u64, max_rejections: u64) {
+        self.assert_not_paused();
+        let root_owner = self.owner_of(parent_id);
+        man0_require!(
+            env::predecessor_account_id() == root_owner,
+            Man0Error::Unauthorized
+        );
+
+        let pending = self
+            .pending_children
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default();
+        man0_require!(
+            (pending.len() as u64) <= max_rejections,
+            Man0Error::MaxPendingChildrenReached
+        );
+        self.pending_children.insert(parent_id, Vec::new());
+    }
 }
