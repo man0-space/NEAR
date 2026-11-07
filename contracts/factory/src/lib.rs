@@ -1933,4 +1933,180 @@ mod tests {
         setup_ctx(&bob, 0, 3_000);
         contract.update_price(id, U128(300));
     }
+
+    #[test]
+    #[should_panic(expected = "ERR_SIGNATURE_EXPIRED")]
+    fn test_set_agent_wallet_expired_deadline_panics() {
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 5_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let id = contract.register_agent(None, None);
+        contract.set_agent_wallet(
+            id,
+            "new.testnet".to_string(),
+            Some(U64(4_999)),
+            None,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_INVALID_SIGNATURE")]
+    fn test_set_agent_wallet_mismatched_signature_args_panics() {
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 5_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let id = contract.register_agent(None, None);
+        contract.set_agent_wallet(
+            id,
+            "new.testnet".to_string(),
+            Some(U64(10_000)),
+            Some(Base64VecU8(vec![0u8; 32])),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_metadata_remove_and_pause_unpause_guards() {
+        let admin = acc("admin.testnet");
+        let alice = acc("alice.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin.clone(), acc("treasury.testnet"), None);
+
+        setup_ctx(&alice, 0, 2_000);
+        let id = contract.register_agent(Some("ipfs://meta".to_string()), None);
+        contract.set_metadata(
+            id,
+            "skill".to_string(),
+            Base64VecU8(b"search".to_vec()),
+        );
+        assert!(contract.get_metadata_keys(id).contains(&"skill".to_string()));
+        contract.remove_metadata(id, "skill".to_string());
+        assert!(contract.get_metadata(id, "skill".to_string()).is_none());
+        assert!(!contract.get_metadata_keys(id).contains(&"skill".to_string()));
+
+        contract.clear_agent_wallet(id);
+        assert_eq!(contract.get_agent_wallet(id), "");
+
+        setup_ctx(&admin, 0, 3_000);
+        contract.pause();
+        assert!(contract.is_paused());
+        contract.unpause();
+        assert!(!contract.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_PAUSED")]
+    fn test_paused_contract_rejects_minting() {
+        let admin = acc("admin.testnet");
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = FactoryContract::new(admin, acc("treasury.testnet"), None);
+        contract.pause();
+        contract.register_agent(None, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_CLONEABLE")]
+    fn test_clone_non_cloneable_agent_panics() {
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 1_000);
+        let mut contract = FactoryContract::new(alice, acc("treasury.testnet"), None);
+        let id = contract.mint_agent(
+            sample_dna(0xad),
+            10,
+            U128(100),
+            None,
+            false, // not cloneable
+            "ipfs://no-clone".to_string(),
+            None,
+        );
+        contract.clone_agent(
+            id,
+            CloneParams {
+                chain_id: 1,
+                license_price: U128(50),
+                model: "m".to_string(),
+                licenses: 5,
+            },
+            "ipfs://c".to_string(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ALREADY_WARPED")]
+    fn test_warp_duplicate_original_hash_panics() {
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 1_000);
+        let mut contract = FactoryContract::new(alice, acc("treasury.testnet"), None);
+        contract.warp_agent(
+            sample_dna(0xae),
+            None,
+            10,
+            U128(100),
+            "ipfs://w1".to_string(),
+        );
+        contract.warp_agent(
+            sample_dna(0xae),
+            None,
+            10,
+            U128(100),
+            "ipfs://w2".to_string(),
+        );
+    }
+
+    #[test]
+    fn test_nft_resolve_transfer_reverts_on_failed_or_false_promise() {
+        use near_sdk::PromiseResult;
+        let alice = acc("alice.testnet");
+        let receiver = acc("receiver.testnet");
+        let operator = acc("operator.testnet");
+
+        setup_ctx(&alice, 1, 1_000);
+        let mut contract = FactoryContract::new(alice.clone(), acc("treasury.testnet"), None);
+        let id = contract.register_agent(Some("ipfs://nft-revert".to_string()), None);
+        contract.set_agent_wallet(id, "alice-agent.testnet".to_string(), None, None, None);
+        contract.nft_approve(id.to_string(), operator.clone(), None);
+
+        // Initiate nft_transfer_call
+        let _ = contract.nft_transfer_call(
+            receiver.clone(),
+            id.to_string(),
+            None,
+            None,
+            "check".to_string(),
+        );
+        // Right after transfer_call, owner is temporarily receiver and wallet is cleared
+        assert_eq!(contract.get_agent(id).unwrap().owner, receiver);
+        assert_eq!(contract.get_agent_wallet(id), "");
+
+        // Simulate callback where nft_on_transfer returned `true` (meaning return token = revert!)
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("factory.testnet"))
+            .predecessor_account_id(acc("factory.testnet"))
+            .signer_account_id(alice.clone());
+        let mut prev_approvals = HashMap::new();
+        prev_approvals.insert(operator.clone(), 1u64);
+
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Successful(b"true".to_vec())],
+        );
+
+        let transferred = contract.nft_resolve_transfer(
+            alice.clone(),
+            receiver,
+            id.to_string(),
+            Some(prev_approvals),
+            Some("alice-agent.testnet".to_string()),
+        );
+        assert!(!transferred);
+        // Owner, agent_wallet, and approvals are all restored!
+        assert_eq!(contract.get_agent(id).unwrap().owner, alice);
+        assert_eq!(contract.get_agent_wallet(id), "alice-agent.testnet");
+        assert!(contract.nft_is_approved(id.to_string(), operator, Some(1)));
+    }
 }
