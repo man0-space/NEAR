@@ -200,4 +200,64 @@ impl WorkflowContract {
         }
         .emit();
     }
+
+    pub fn set_coordinator(
+        &mut self,
+        workflow_id: u64,
+        has_coordinator: bool,
+        model: String,
+    ) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        let root_owner = self.owner_of(workflow_id);
+        man0_require!(caller == root_owner, Man0Error::Unauthorized);
+
+        let wf = self
+            .workflows
+            .get_mut(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic());
+        wf.has_coordinator = has_coordinator;
+        wf.coordinator_model = model;
+    }
+
+    pub fn update_lease_settings(
+        &mut self,
+        workflow_id: u64,
+        enabled: bool,
+        duration_days: u64,
+        percent: u8,
+    ) {
+        self.assert_not_paused();
+        man0_require!(percent <= MAX_LEASE_PERCENT, Man0Error::InvalidLeasePercent);
+        let caller = env::predecessor_account_id();
+        let root_owner = self.owner_of(workflow_id);
+        man0_require!(caller == root_owner, Man0Error::Unauthorized);
+
+        let wf = self
+            .workflows
+            .get_mut(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic());
+        wf.lease_enabled = enabled;
+        wf.lease_duration = duration_days;
+        wf.lease_percent = percent;
+    }
+
+    pub fn consume_unit(&mut self, workflow_id: u64) -> u64 {
+        self.assert_not_paused();
+        let wf = self
+            .workflows
+            .get_mut(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic());
+        if wf.units > 0 {
+            man0_require!(
+                wf.units_minted < wf.units,
+                Man0Error::WorkflowUnitsExhausted
+            );
+        }
+        wf.units_minted = wf
+            .units_minted
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        wf.units_minted
+    }
 }
