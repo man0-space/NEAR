@@ -260,4 +260,121 @@ impl WorkflowContract {
             .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
         wf.units_minted
     }
+
+    // =========================================================================
+    // ERC-7401 Nestable NFT Operations
+    // =========================================================================
+
+    pub fn propose_child(
+        &mut self,
+        parent_id: u64,
+        child_contract: AccountId,
+        child_id: u64,
+    ) {
+        self.assert_not_paused();
+        man0_require!(
+            self.workflows.contains_key(&parent_id),
+            Man0Error::WorkflowNotFound
+        );
+        if child_contract == env::current_account_id() {
+            man0_require!(parent_id != child_id, Man0Error::NestingCycleDetected);
+            self.assert_no_nesting_cycle(parent_id, child_id);
+            let child_root = self.owner_of(child_id);
+            man0_require!(
+                env::predecessor_account_id() == child_root,
+                Man0Error::Unauthorized
+            );
+            self.direct_owners.insert(
+                child_id,
+                DirectOwner {
+                    owner_id: env::current_account_id(),
+                    parent_token_id: parent_id,
+                    is_nft: true,
+                },
+            );
+        }
+
+        let max_pending = self
+            .max_pending_children
+            .get(&parent_id)
+            .copied()
+            .unwrap_or(DEFAULT_MAX_PENDING_CHILDREN) as usize;
+        let mut pending = self
+            .pending_children
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default();
+        man0_require!(
+            pending.len() < max_pending,
+            Man0Error::MaxPendingChildrenReached
+        );
+
+        let candidate = Child {
+            contract_id: child_contract.clone(),
+            token_id: child_id,
+        };
+        man0_require!(
+            !pending.contains(&candidate),
+            Man0Error::ChildAlreadyProposed
+        );
+        let active = self
+            .active_children
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default();
+        man0_require!(!active.contains(&candidate), Man0Error::ChildAlreadyNested);
+
+        pending.push(candidate);
+        self.pending_children.insert(parent_id, pending);
+
+        Man0Event::ChildProposed {
+            parent_token_id: parent_id,
+            child_contract,
+            child_token_id: child_id,
+        }
+        .emit();
+    }
+
+    pub fn accept_child(
+        &mut self,
+        parent_id: u64,
+        index: u64,
+        child_contract: AccountId,
+        child_id: u64,
+    ) {
+        self.assert_not_paused();
+        let root_owner = self.owner_of(parent_id);
+        man0_require!(
+            env::predecessor_account_id() == root_owner,
+            Man0Error::Unauthorized
+        );
+
+        let pending = self
+            .pending_children
+            .get_mut(&parent_id)
+            .unwrap_or_else(|| Man0Error::PendingChildMismatch.panic());
+        let idx = index as usize;
+        man0_require!(idx < pending.len(), Man0Error::PendingChildMismatch);
+        let expected = Child {
+            contract_id: child_contract.clone(),
+            token_id: child_id,
+        };
+        man0_require!(pending[idx] == expected, Man0Error::PendingChildMismatch);
+        pending.remove(idx);
+
+        let mut active = self
+            .active_children
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default();
+        active.push(expected);
+        self.active_children.insert(parent_id, active);
+
+        Man0Event::ChildAccepted {
+            parent_token_id: parent_id,
+            child_contract,
+            child_token_id: child_id,
+        }
+        .emit();
+    }
 }
