@@ -145,4 +145,59 @@ impl WorkflowContract {
             cached_agents: LookupMap::new(StorageKey::CachedAgents),
         }
     }
+
+    // =========================================================================
+    // Workflow Minting & Composition (ERC-7401)
+    // =========================================================================
+
+    pub fn mint_workflow(&mut self, params: MintWorkflowParams, agent_ids: Vec<u64>) -> u64 {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        self.internal_mint_workflow(caller, params, agent_ids, None)
+    }
+
+    pub fn add_agent_to_workflow(&mut self, workflow_id: u64, agent_id: u64) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        let _ = self.internal_add_agent_to_workflow(caller, workflow_id, agent_id, None);
+    }
+
+    pub fn remove_agent_from_workflow(&mut self, workflow_id: u64, agent_id: u64) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        let root_owner = self.owner_of(workflow_id);
+        man0_require!(caller == root_owner, Man0Error::Unauthorized);
+
+        let children = self
+            .active_children
+            .get_mut(&workflow_id)
+            .unwrap_or_else(|| Man0Error::ActiveChildMismatch.panic());
+        let pos = children
+            .iter()
+            .position(|c| c.contract_id == self.factory && c.token_id == agent_id)
+            .unwrap_or_else(|| Man0Error::ActiveChildMismatch.panic());
+        children.remove(pos);
+
+        let pair = WorkflowAgentPair {
+            workflow_id,
+            agent_id,
+        };
+        let price = self.agent_license_prices.remove(&pair).unwrap_or(0);
+
+        let wf = self.workflows.get_mut(&workflow_id).unwrap();
+        wf.total_price = wf.total_price.saturating_sub(price);
+
+        if self.sync_factory_xcc {
+            let _ = ext_factory::ext(self.factory.clone())
+                .with_static_gas(GAS_FOR_REVOKE_LICENSE)
+                .revoke_license(agent_id, env::current_account_id(), workflow_id);
+        }
+
+        Man0Event::AgentRemovedFromWorkflow {
+            workflow_id,
+            agent_id,
+            license_price: U128(price),
+        }
+        .emit();
+    }
 }
