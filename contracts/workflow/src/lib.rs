@@ -446,4 +446,127 @@ impl WorkflowContract {
         );
         self.pending_children.insert(parent_id, Vec::new());
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn unnest_child(
+        &mut self,
+        parent_id: u64,
+        index: u64,
+        child_contract: AccountId,
+        child_id: u64,
+        to: AccountId,
+        is_nft: bool,
+        dest_parent_id: Option<u64>,
+    ) {
+        self.assert_not_paused();
+        let root_owner = self.owner_of(parent_id);
+        man0_require!(
+            env::predecessor_account_id() == root_owner,
+            Man0Error::Unauthorized
+        );
+
+        let active = self
+            .active_children
+            .get_mut(&parent_id)
+            .unwrap_or_else(|| Man0Error::ActiveChildMismatch.panic());
+        let idx = index as usize;
+        man0_require!(idx < active.len(), Man0Error::ActiveChildMismatch);
+        let expected = Child {
+            contract_id: child_contract.clone(),
+            token_id: child_id,
+        };
+        man0_require!(active[idx] == expected, Man0Error::ActiveChildMismatch);
+        active.remove(idx);
+
+        if child_contract == env::current_account_id() {
+            if is_nft {
+                let target_parent = dest_parent_id.unwrap_or(0);
+                man0_require!(target_parent > 0, Man0Error::WorkflowNotFound);
+                self.direct_owners.insert(
+                    child_id,
+                    DirectOwner {
+                        owner_id: to,
+                        parent_token_id: target_parent,
+                        is_nft: true,
+                    },
+                );
+            } else {
+                self.direct_owners.insert(
+                    child_id,
+                    DirectOwner {
+                        owner_id: to.clone(),
+                        parent_token_id: 0,
+                        is_nft: false,
+                    },
+                );
+                if let Some(wf) = self.workflows.get_mut(&child_id) {
+                    wf.owner = to;
+                }
+            }
+        }
+
+        Man0Event::ChildUnnested {
+            parent_token_id: parent_id,
+            child_contract,
+            child_token_id: child_id,
+        }
+        .emit();
+    }
+
+    pub fn set_max_pending_children(&mut self, token_id: u64, max_children: u16) {
+        let root_owner = self.owner_of(token_id);
+        man0_require!(
+            env::predecessor_account_id() == root_owner,
+            Man0Error::Unauthorized
+        );
+        self.max_pending_children.insert(token_id, max_children);
+    }
+
+    pub fn children_of(&self, parent_id: u64) -> Vec<Child> {
+        self.active_children
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn pending_children_of(&self, parent_id: u64) -> Vec<Child> {
+        self.pending_children
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn child_of(&self, parent_id: u64, index: u64) -> Option<Child> {
+        self.active_children
+            .get(&parent_id)
+            .and_then(|v| v.get(index as usize).cloned())
+    }
+
+    pub fn pending_child_of(&self, parent_id: u64, index: u64) -> Option<Child> {
+        self.pending_children
+            .get(&parent_id)
+            .and_then(|v| v.get(index as usize).cloned())
+    }
+
+    pub fn direct_owner_of(&self, token_id: u64) -> Option<DirectOwner> {
+        self.direct_owners.get(&token_id).cloned()
+    }
+
+    pub fn owner_of(&self, token_id: u64) -> AccountId {
+        let mut current = token_id;
+        for _ in 0..MAX_NESTING_DEPTH {
+            let direct = self
+                .direct_owners
+                .get(&current)
+                .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic());
+            if !direct.is_nft {
+                return direct.owner_id.clone();
+            }
+            if direct.owner_id != env::current_account_id() {
+                return direct.owner_id.clone();
+            }
+            current = direct.parent_token_id;
+        }
+        Man0Error::MaxNestingDepthExceeded.panic()
+    }
 }
