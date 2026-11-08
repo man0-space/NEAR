@@ -713,4 +713,86 @@ impl WorkflowContract {
         }
         .emit();
     }
+
+    // =========================================================================
+    // Lease Engine
+    // =========================================================================
+
+    pub fn create_lease(&mut self, workflow_id: u64, duration_days: u64) -> u64 {
+        self.assert_not_paused();
+        man0_require!(!self.is_leased(workflow_id), Man0Error::WorkflowAlreadyLeased);
+
+        if let Some(old_id) = self.active_lease_by_workflow.remove(&workflow_id) {
+            if let Some(old_lease) = self.leases.get_mut(&old_id) {
+                old_lease.is_active = false;
+            }
+            self.active_leases.remove(&old_id);
+        }
+
+        let wf = self
+            .workflows
+            .get(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic());
+        man0_require!(wf.lease_enabled, Man0Error::LeaseNotEnabled);
+
+        let effective_days = if duration_days == 0 {
+            wf.lease_duration
+        } else {
+            duration_days
+        };
+        man0_require!(
+            effective_days > 0 && effective_days <= wf.lease_duration,
+            Man0Error::InvalidDuration
+        );
+
+        let creator_percent = wf.lease_percent;
+        let leaser = env::predecessor_account_id();
+        let start_time = env::block_timestamp();
+        let duration_ns = effective_days
+            .checked_mul(NANOS_PER_DAY)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        let end_time = start_time
+            .checked_add(duration_ns)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+
+        let lease_id = self.next_lease_id;
+        self.next_lease_id = self
+            .next_lease_id
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        self.total_leases = self.total_leases.saturating_add(1);
+
+        let record = LeaseRecord {
+            lease_id,
+            workflow_id,
+            leaser: leaser.clone(),
+            start_time,
+            end_time,
+            creator_percent,
+            is_active: true,
+        };
+        self.leases.insert(lease_id, record);
+        self.active_lease_by_workflow.insert(workflow_id, lease_id);
+        self.active_leases.insert(lease_id);
+
+        let mut list = self
+            .leases_by_leaser
+            .get(&leaser)
+            .cloned()
+            .unwrap_or_default();
+        list.push(lease_id);
+        self.leases_by_leaser.insert(leaser.clone(), list);
+
+        Man0Event::LeaseCreated {
+            lease_id,
+            workflow_id,
+            leaser,
+            start_time,
+            end_time,
+            creator_percent,
+        }
+        .emit();
+
+        lease_id
+    }
 }
