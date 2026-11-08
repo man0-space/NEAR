@@ -631,4 +631,86 @@ impl WorkflowContract {
         }
         .emit();
     }
+
+    pub fn accept_agent(&mut self, rfa_id: u64, agent_id: u64) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+
+        let subs = self
+            .rfa_submissions
+            .get(&rfa_id)
+            .cloned()
+            .unwrap_or_default();
+        let sub = subs
+            .iter()
+            .find(|s| s.agent_id == agent_id)
+            .cloned()
+            .unwrap_or_else(|| Man0Error::AgentNotSubmitted.panic());
+
+        let (workflow_id, offer_amount) = {
+            let rfa = self
+                .rfas
+                .get_mut(&rfa_id)
+                .unwrap_or_else(|| Man0Error::RfaNotFound.panic());
+            man0_require!(caller == rfa.publisher, Man0Error::Unauthorized);
+            man0_require!(rfa.status == RfaStatus::Open, Man0Error::RfaNotOpen);
+
+            rfa.status = RfaStatus::Fulfilled;
+            rfa.fulfilled_by_agent_id = agent_id;
+            rfa.agent_creator = Some(sub.creator.clone());
+            (rfa.workflow_id, rfa.offer_amount)
+        };
+
+        self.open_rfas.remove(&rfa_id);
+        self.internal_resolve_workflow_rfa(workflow_id);
+
+        if offer_amount > 0 {
+            self.internal_payout(sub.creator.clone(), offer_amount, "RFA fulfillment payout");
+        }
+
+        Man0Event::RfaFulfilled {
+            rfa_id,
+            workflow_id,
+            agent_id,
+            agent_creator: sub.creator,
+            offer_amount: U128(offer_amount),
+        }
+        .emit();
+    }
+
+    pub fn cancel_rfa(&mut self, rfa_id: u64) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+
+        let (workflow_id, offer_amount, publisher) = {
+            let rfa = self
+                .rfas
+                .get_mut(&rfa_id)
+                .unwrap_or_else(|| Man0Error::RfaNotFound.panic());
+            man0_require!(caller == rfa.publisher, Man0Error::Unauthorized);
+            man0_require!(rfa.status == RfaStatus::Open, Man0Error::RfaNotOpen);
+
+            rfa.status = RfaStatus::Cancelled;
+            (rfa.workflow_id, rfa.offer_amount, rfa.publisher.clone())
+        };
+
+        self.open_rfas.remove(&rfa_id);
+        self.internal_resolve_workflow_rfa(workflow_id);
+
+        if offer_amount > 0 {
+            self.internal_payout(
+                publisher.clone(),
+                offer_amount,
+                "RFA cancellation refund",
+            );
+        }
+
+        Man0Event::RfaCancelled {
+            rfa_id,
+            workflow_id,
+            publisher,
+            refunded_amount: U128(offer_amount),
+        }
+        .emit();
+    }
 }
