@@ -875,4 +875,72 @@ impl WorkflowContract {
         let leaser_amount = total_amount.0.saturating_sub(creator_amount);
         (U128(creator_amount), U128(leaser_amount))
     }
+
+    // =========================================================================
+    // NEP-141 `ft_on_transfer` Receiver (USDC Settlement)
+    // =========================================================================
+
+    /// NEP-141 standard FungibleTokenReceiver entrypoint.
+    /// Returns unused token amount to refund to `sender_id`.
+    pub fn ft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        self.assert_not_paused();
+        let token_contract = env::predecessor_account_id();
+        man0_require!(
+            self.payment_token.as_ref() == Some(&token_contract),
+            Man0Error::InvalidPaymentToken
+        );
+
+        let action: WorkflowFtAction = serde_json::from_str(&msg)
+            .unwrap_or_else(|_| Man0Error::InvalidPaymentMessage.panic());
+
+        match action {
+            WorkflowFtAction::MintWorkflow { params, agent_ids } => {
+                let wf_id = self.internal_mint_workflow(
+                    sender_id,
+                    params,
+                    agent_ids,
+                    Some(amount.0),
+                );
+                let used = self.workflows.get(&wf_id).map(|w| w.total_price).unwrap_or(0);
+                PromiseOrValue::Value(U128(amount.0.saturating_sub(used)))
+            }
+            WorkflowFtAction::AddAgentToWorkflow {
+                workflow_id,
+                agent_id,
+            } => {
+                let used = self.internal_add_agent_to_workflow(
+                    sender_id,
+                    workflow_id,
+                    agent_id,
+                    Some(amount.0),
+                );
+                PromiseOrValue::Value(U128(amount.0.saturating_sub(used)))
+            }
+            WorkflowFtAction::CreateRfa {
+                workflow_id,
+                title,
+                description,
+                required_skills,
+            } => {
+                let _ = self.internal_create_rfa(
+                    sender_id,
+                    workflow_id,
+                    title,
+                    description,
+                    required_skills,
+                    amount.0,
+                );
+                PromiseOrValue::Value(U128(0))
+            }
+            WorkflowFtAction::DistributeLeaseFees { lease_id } => {
+                self.internal_distribute_lease_fees(lease_id, amount.0);
+                PromiseOrValue::Value(U128(0))
+            }
+        }
+    }
 }
