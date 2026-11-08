@@ -569,4 +569,66 @@ impl WorkflowContract {
         }
         Man0Error::MaxNestingDepthExceeded.panic()
     }
+
+    // =========================================================================
+    // RFA (Request-For-Agent) Escrow Engine
+    // =========================================================================
+
+    pub fn create_rfa(
+        &mut self,
+        workflow_id: u64,
+        title: String,
+        description: String,
+        required_skills: Vec<String>,
+        offer_amount: U128,
+    ) -> u64 {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+        self.internal_create_rfa(
+            caller,
+            workflow_id,
+            title,
+            description,
+            required_skills,
+            offer_amount.0,
+        )
+    }
+
+    pub fn submit_agent(&mut self, rfa_id: u64, agent_id: u64) {
+        self.assert_not_paused();
+        man0_require!(agent_id > 0, Man0Error::AgentNotFound);
+        let rfa = self
+            .rfas
+            .get(&rfa_id)
+            .unwrap_or_else(|| Man0Error::RfaNotFound.panic());
+        man0_require!(rfa.status == RfaStatus::Open, Man0Error::RfaNotOpen);
+
+        let caller = env::predecessor_account_id();
+        if let Some(cached) = self.cached_agents.get(&agent_id) {
+            man0_require!(caller == cached.creator, Man0Error::Unauthorized);
+        }
+
+        let mut subs = self
+            .rfa_submissions
+            .get(&rfa_id)
+            .cloned()
+            .unwrap_or_default();
+        man0_require!(
+            !subs.iter().any(|s| s.agent_id == agent_id),
+            Man0Error::AgentAlreadySubmitted
+        );
+        subs.push(Submission {
+            agent_id,
+            creator: caller.clone(),
+            submitted_at: U64(env::block_timestamp()),
+        });
+        self.rfa_submissions.insert(rfa_id, subs);
+
+        Man0Event::AgentSubmittedToRfa {
+            rfa_id,
+            agent_id,
+            creator: caller,
+        }
+        .emit();
+    }
 }
