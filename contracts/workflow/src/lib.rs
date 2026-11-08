@@ -795,4 +795,84 @@ impl WorkflowContract {
 
         lease_id
     }
+
+    pub fn terminate_lease(&mut self, lease_id: u64) {
+        self.assert_not_paused();
+        let caller = env::predecessor_account_id();
+
+        let (workflow_id, leaser) = {
+            let lease = self
+                .leases
+                .get(&lease_id)
+                .unwrap_or_else(|| Man0Error::LeaseNotFound.panic());
+            man0_require!(lease.is_active, Man0Error::LeaseNotActive);
+            (lease.workflow_id, lease.leaser.clone())
+        };
+
+        let wf_creator = self
+            .workflows
+            .get(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic())
+            .creator
+            .clone();
+        man0_require!(
+            caller == leaser || caller == wf_creator,
+            Man0Error::Unauthorized
+        );
+
+        let lease_mut = self.leases.get_mut(&lease_id).unwrap();
+        lease_mut.is_active = false;
+        self.active_lease_by_workflow.remove(&workflow_id);
+        self.active_leases.remove(&lease_id);
+
+        Man0Event::LeaseTerminated {
+            lease_id,
+            workflow_id,
+            terminated_by: caller,
+        }
+        .emit();
+    }
+
+    pub fn expire_lease_if_needed(&mut self, lease_id: u64) {
+        let workflow_id = {
+            let lease = self
+                .leases
+                .get_mut(&lease_id)
+                .unwrap_or_else(|| Man0Error::LeaseNotFound.panic());
+            man0_require!(lease.is_active, Man0Error::LeaseNotActive);
+            man0_require!(
+                env::block_timestamp() >= lease.end_time,
+                Man0Error::LeaseNotExpired
+            );
+            lease.is_active = false;
+            lease.workflow_id
+        };
+        self.active_lease_by_workflow.remove(&workflow_id);
+        self.active_leases.remove(&lease_id);
+
+        Man0Event::LeaseExpired {
+            lease_id,
+            workflow_id,
+        }
+        .emit();
+    }
+
+    pub fn distribute_lease_fees(&mut self, lease_id: u64, total_amount: U128) {
+        self.assert_not_paused();
+        self.internal_distribute_lease_fees(lease_id, total_amount.0);
+    }
+
+    pub fn calculate_fee_split(&self, lease_id: u64, total_amount: U128) -> (U128, U128) {
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .unwrap_or_else(|| Man0Error::LeaseNotFound.panic());
+        let creator_amount = total_amount
+            .0
+            .checked_mul(lease.creator_percent as u128)
+            .unwrap()
+            / 100;
+        let leaser_amount = total_amount.0.saturating_sub(creator_amount);
+        (U128(creator_amount), U128(leaser_amount))
+    }
 }
