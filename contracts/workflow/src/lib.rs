@@ -943,4 +943,52 @@ impl WorkflowContract {
             }
         }
     }
+
+    // =========================================================================
+    // NEP-171 / NEP-177 / NEP-178 / NEP-181 Standard NFT Implementation
+    // =========================================================================
+
+    pub fn nft_metadata(&self) -> NFTContractMetadata {
+        NFTContractMetadata {
+            spec: "nft-1.0.0".to_string(),
+            name: "man0 Workflows".to_string(),
+            symbol: "MAN0W".to_string(),
+            icon: None,
+            base_uri: None,
+            reference: None,
+            reference_hash: None,
+        }
+    }
+
+    pub fn nft_token(&self, token_id: String) -> Option<JsonToken> {
+        let id: u64 = token_id.parse().ok()?;
+        let wf = self.workflows.get(&id)?;
+        let approvals = self
+            .token_approvals
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        Some(JsonToken {
+            token_id,
+            owner_id: self.owner_of(id),
+            metadata: TokenMetadata {
+                title: Some(wf.title.clone()),
+                description: Some(wf.description.clone()),
+                media: if wf.banner.is_empty() {
+                    None
+                } else {
+                    Some(wf.banner.clone())
+                },
+                copies: Some(wf.units),
+                issued_at: Some(wf.created_at.to_string()),
+                reference: if wf.workflow_card_uri.is_empty() {
+                    None
+                } else {
+                    Some(wf.workflow_card_uri.clone())
+                },
+                ..Default::default()
+            },
+            approved_account_ids: approvals,
+        })
+    }
 }
