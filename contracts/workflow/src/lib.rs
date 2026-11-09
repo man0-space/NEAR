@@ -1305,4 +1305,48 @@ impl WorkflowContract {
     pub fn total_rfas(&self) -> u64 {
         self.total_rfas
     }
+
+    pub fn get_lease(&self, lease_id: u64) -> Option<LeaseView> {
+        self.leases.get(&lease_id).map(|l| l.to_view())
+    }
+
+    pub fn get_active_lease_for_workflow(&self, workflow_id: u64) -> u64 {
+        let Some(&lease_id) = self.active_lease_by_workflow.get(&workflow_id) else {
+            return 0;
+        };
+        if let Some(lease) = self.leases.get(&lease_id) {
+            if lease.is_active && env::block_timestamp() < lease.end_time {
+                return lease_id;
+            }
+        }
+        0
+    }
+
+    pub fn is_leased(&self, workflow_id: u64) -> bool {
+        self.get_active_lease_for_workflow(workflow_id) > 0
+    }
+
+    pub fn get_leases_by_leaser(&self, leaser: AccountId) -> Vec<u64> {
+        self.leases_by_leaser
+            .get(&leaser)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_active_leases(&self) -> Vec<u64> {
+        self.active_leases
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.leases
+                    .get(id)
+                    .map(|l| l.is_active && env::block_timestamp() < l.end_time)
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    pub fn total_leases(&self) -> u64 {
+        self.total_leases
+    }
 }
