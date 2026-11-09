@@ -1214,4 +1214,95 @@ impl WorkflowContract {
             .filter_map(|id| self.nft_token(id.to_string()))
             .collect()
     }
+
+    // =========================================================================
+    // View Methods
+    // =========================================================================
+
+    pub fn get_workflow(&self, workflow_id: u64) -> Option<WorkflowView> {
+        self.workflows.get(&workflow_id).map(|w| w.to_view())
+    }
+
+    pub fn get_workflow_agents(&self, workflow_id: u64) -> Vec<u64> {
+        self.active_children
+            .get(&workflow_id)
+            .map(|children| {
+                children
+                    .iter()
+                    .filter(|c| c.contract_id == self.factory)
+                    .map(|c| c.token_id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_agent_count(&self, workflow_id: u64) -> u64 {
+        self.get_workflow_agents(workflow_id).len() as u64
+    }
+
+    pub fn is_complete(&self, workflow_id: u64) -> bool {
+        self.workflows
+            .get(&workflow_id)
+            .map(|w| !w.has_active_rfa)
+            .unwrap_or(false)
+    }
+
+    pub fn has_active_rfa(&self, workflow_id: u64) -> bool {
+        self.workflows
+            .get(&workflow_id)
+            .map(|w| w.has_active_rfa)
+            .unwrap_or(false)
+    }
+
+    pub fn get_workflows_by_creator(&self, creator: AccountId) -> Vec<u64> {
+        self.workflows_by_creator
+            .get(&creator)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_complete_workflows(&self) -> Vec<u64> {
+        self.complete_workflows.iter().copied().collect()
+    }
+
+    pub fn get_workflows_with_rfa(&self) -> Vec<u64> {
+        self.workflows_with_rfa.iter().copied().collect()
+    }
+
+    pub fn total_workflows(&self) -> u64 {
+        self.total_workflows
+    }
+
+    pub fn get_rfa(&self, rfa_id: u64) -> Option<RfaView> {
+        self.rfas.get(&rfa_id).map(|r| r.to_view())
+    }
+
+    pub fn get_rfa_for_workflow(&self, workflow_id: u64) -> u64 {
+        self.workflows
+            .get(&workflow_id)
+            .map(|w| w.rfa_id)
+            .unwrap_or(0)
+    }
+
+    pub fn get_submissions(&self, rfa_id: u64) -> Vec<Submission> {
+        self.rfa_submissions
+            .get(&rfa_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_open_rfas(&self) -> Vec<u64> {
+        self.open_rfas.iter().copied().collect()
+    }
+
+    pub fn get_rfas_by_publisher(&self, publisher: AccountId) -> Vec<u64> {
+        self.rfas_by_publisher
+            .get(&publisher)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn total_rfas(&self) -> u64 {
+        self.total_rfas
+    }
 }
