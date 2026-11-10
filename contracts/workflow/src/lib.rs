@@ -1349,4 +1349,68 @@ impl WorkflowContract {
     pub fn total_leases(&self) -> u64 {
         self.total_leases
     }
+
+    // =========================================================================
+    // Admin & Configuration
+    // =========================================================================
+
+    pub fn cache_agent_info(&mut self, agent_id: u64, info: AgentPermissionInfo) {
+        let caller = env::predecessor_account_id();
+        man0_require!(
+            caller == self.admin || caller == self.factory,
+            Man0Error::Unauthorized
+        );
+        self.cached_agents.insert(agent_id, info);
+    }
+
+    pub fn set_sync_factory_xcc(&mut self, enabled: bool) {
+        self.assert_admin();
+        self.sync_factory_xcc = enabled;
+    }
+
+    pub fn set_factory(&mut self, new_factory: AccountId) {
+        self.assert_admin();
+        self.factory = new_factory;
+    }
+
+    pub fn set_treasury(&mut self, new_treasury: AccountId) {
+        self.assert_admin();
+        self.treasury = new_treasury;
+    }
+
+    pub fn set_payment_token(&mut self, new_token: Option<AccountId>) {
+        self.assert_admin();
+        self.payment_token = new_token;
+    }
+
+    pub fn transfer_admin(&mut self, new_admin: AccountId) {
+        self.assert_admin();
+        self.admin = new_admin;
+    }
+
+    pub fn pause(&mut self) {
+        self.assert_admin();
+        self.paused = true;
+    }
+
+    pub fn unpause(&mut self) {
+        self.assert_admin();
+        self.paused = false;
+    }
+
+    pub fn get_admin(&self) -> AccountId {
+        self.admin.clone()
+    }
+
+    pub fn get_treasury(&self) -> AccountId {
+        self.treasury.clone()
+    }
+
+    pub fn get_factory(&self) -> AccountId {
+        self.factory.clone()
+    }
+
+    pub fn get_payment_token(&self) -> Option<AccountId> {
+        self.payment_token.clone()
+    }
 }
