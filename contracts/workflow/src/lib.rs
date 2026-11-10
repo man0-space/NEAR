@@ -1638,4 +1638,44 @@ impl WorkflowContract {
 
         price
     }
+
+    #[private]
+    pub fn on_consume_license(&mut self, workflow_id: u64, agent_id: u64, previous_price: U128) {
+        match env::promise_result_checked(0, 4096) {
+            Ok(bytes) => {
+                if let Ok(info) = serde_json::from_slice::<AgentPermissionInfo>(&bytes) {
+                    self.cached_agents.insert(agent_id, info.clone());
+                    let actual_price = info.license_price.0;
+                    if actual_price != previous_price.0 {
+                        self.agent_license_prices.insert(
+                            WorkflowAgentPair {
+                                workflow_id,
+                                agent_id,
+                            },
+                            actual_price,
+                        );
+                        if let Some(wf) = self.workflows.get_mut(&workflow_id) {
+                            wf.total_price = wf
+                                .total_price
+                                .saturating_sub(previous_price.0)
+                                .saturating_add(actual_price);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Rollback child addition if factory license consumption failed
+                if let Some(children) = self.active_children.get_mut(&workflow_id) {
+                    children.retain(|c| !(c.contract_id == self.factory && c.token_id == agent_id));
+                }
+                self.agent_license_prices.remove(&WorkflowAgentPair {
+                    workflow_id,
+                    agent_id,
+                });
+                if let Some(wf) = self.workflows.get_mut(&workflow_id) {
+                    wf.total_price = wf.total_price.saturating_sub(previous_price.0);
+                }
+            }
+        }
+    }
 }
