@@ -1413,4 +1413,138 @@ impl WorkflowContract {
     pub fn get_payment_token(&self) -> Option<AccountId> {
         self.payment_token.clone()
     }
+
+    // =========================================================================
+    // Internal Helpers & Callbacks
+    // =========================================================================
+
+    fn assert_admin(&self) {
+        man0_require!(
+            env::predecessor_account_id() == self.admin,
+            Man0Error::Unauthorized
+        );
+    }
+
+    fn assert_not_paused(&self) {
+        man0_require!(!self.paused, Man0Error::Paused);
+    }
+
+    fn parse_token_id(token_id: &str) -> u64 {
+        token_id
+            .parse::<u64>()
+            .unwrap_or_else(|_| Man0Error::WorkflowNotFound.panic())
+    }
+
+    fn assert_no_nesting_cycle(&self, parent_id: u64, child_id: u64) {
+        let mut current = parent_id;
+        for _ in 0..MAX_NESTING_DEPTH {
+            if current == child_id {
+                Man0Error::NestingCycleDetected.panic();
+            }
+            let Some(direct) = self.direct_owners.get(&current) else {
+                break;
+            };
+            if !direct.is_nft || direct.owner_id != env::current_account_id() {
+                break;
+            }
+            current = direct.parent_token_id;
+        }
+    }
+
+    fn internal_mint_workflow(
+        &mut self,
+        creator: AccountId,
+        params: MintWorkflowParams,
+        agent_ids: Vec<u64>,
+        available_budget: Option<u128>,
+    ) -> u64 {
+        man0_require!(params.units > 0, Man0Error::ZeroUnits);
+        man0_require!(
+            params.lease_percent <= MAX_LEASE_PERCENT,
+            Man0Error::InvalidLeasePercent
+        );
+        validate_uri(&params.workflow_card_uri, true).unwrap_or_else(|e| e.panic());
+
+        let workflow_id = self.next_workflow_id;
+        self.next_workflow_id = self
+            .next_workflow_id
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        self.total_workflows = self.total_workflows.saturating_add(1);
+
+        let record = WorkflowRecord {
+            workflow_id,
+            title: params.title.clone(),
+            description: params.description,
+            banner: params.banner,
+            workflow_card_uri: params.workflow_card_uri,
+            total_price: 0,
+            units: params.units,
+            units_minted: 0,
+            creator: creator.clone(),
+            owner: creator.clone(),
+            lease_enabled: params.lease_enabled,
+            lease_duration: params.lease_duration,
+            lease_percent: params.lease_percent,
+            has_coordinator: params.has_coordinator,
+            coordinator_model: params.coordinator_model,
+            has_active_rfa: false,
+            rfa_id: 0,
+            created_at: env::block_timestamp(),
+        };
+        self.workflows.insert(workflow_id, record);
+        self.direct_owners.insert(
+            workflow_id,
+            DirectOwner {
+                owner_id: creator.clone(),
+                parent_token_id: 0,
+                is_nft: false,
+            },
+        );
+        self.active_children.insert(workflow_id, Vec::new());
+        self.pending_children.insert(workflow_id, Vec::new());
+        self.complete_workflows.insert(workflow_id);
+        self.add_token_to_owner(&creator, workflow_id);
+
+        let mut by_creator = self
+            .workflows_by_creator
+            .get(&creator)
+            .cloned()
+            .unwrap_or_default();
+        by_creator.push(workflow_id);
+        self.workflows_by_creator.insert(creator.clone(), by_creator);
+
+        let mut remaining_budget = available_budget;
+        for agent_id in agent_ids {
+            let cost = self.internal_add_agent_to_workflow(
+                creator.clone(),
+                workflow_id,
+                agent_id,
+                remaining_budget,
+            );
+            if let Some(rem) = remaining_budget {
+                remaining_budget = Some(rem.saturating_sub(cost));
+            }
+        }
+
+        let total_price = self.workflows.get(&workflow_id).unwrap().total_price;
+
+        Nep171Event::NftMint {
+            owner_id: creator.clone(),
+            token_ids: vec![workflow_id.to_string()],
+            memo: None,
+        }
+        .emit();
+
+        Man0Event::WorkflowMinted {
+            workflow_id,
+            creator,
+            title: params.title,
+            total_price: U128(total_price),
+            units: params.units,
+        }
+        .emit();
+
+        workflow_id
+    }
 }
