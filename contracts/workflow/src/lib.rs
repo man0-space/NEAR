@@ -1800,4 +1800,92 @@ impl WorkflowContract {
         }
         .emit();
     }
+
+    fn internal_payout(&self, recipient: AccountId, amount: u128, memo: &str) {
+        if amount == 0 {
+            return;
+        }
+        if let Some(ref ft) = self.payment_token {
+            let _ = ext_ft::ext(ft.clone())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(GAS_FOR_FT_TRANSFER)
+                .ft_transfer(recipient, U128(amount), Some(memo.to_string()));
+        }
+    }
+
+    fn add_token_to_owner(&mut self, owner: &AccountId, workflow_id: u64) {
+        if !self.tokens_per_owner.contains_key(owner) {
+            let set_key = StorageKey::OwnerSet {
+                account_hash: env::sha256_array(owner.as_bytes()),
+            };
+            self.tokens_per_owner
+                .insert(owner.clone(), IterableSet::new(set_key));
+        }
+        if let Some(set) = self.tokens_per_owner.get_mut(owner) {
+            set.insert(workflow_id);
+        }
+    }
+
+    fn remove_token_from_owner(&mut self, owner: &AccountId, workflow_id: u64) {
+        if let Some(set) = self.tokens_per_owner.get_mut(owner) {
+            set.remove(&workflow_id);
+        }
+    }
+
+    fn internal_transfer(
+        &mut self,
+        sender_id: &AccountId,
+        receiver_id: &AccountId,
+        workflow_id: u64,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+    ) -> (AccountId, Option<HashMap<AccountId, u64>>) {
+        let previous_owner = self.owner_of(workflow_id);
+        man0_require!(&previous_owner != receiver_id, Man0Error::Unauthorized);
+
+        let is_owner = sender_id == &previous_owner;
+        if !is_owner {
+            let approvals = self
+                .token_approvals
+                .get(&workflow_id)
+                .unwrap_or_else(|| Man0Error::Unauthorized.panic());
+            let &stored_approval_id = approvals
+                .get(sender_id)
+                .unwrap_or_else(|| Man0Error::Unauthorized.panic());
+            if let Some(expected) = approval_id {
+                man0_require!(stored_approval_id == expected, Man0Error::Unauthorized);
+            }
+        }
+
+        let previous_approvals = self.token_approvals.remove(&workflow_id);
+        self.remove_token_from_owner(&previous_owner, workflow_id);
+        self.add_token_to_owner(receiver_id, workflow_id);
+
+        if let Some(wf) = self.workflows.get_mut(&workflow_id) {
+            wf.owner = receiver_id.clone();
+        }
+        self.direct_owners.insert(
+            workflow_id,
+            DirectOwner {
+                owner_id: receiver_id.clone(),
+                parent_token_id: 0,
+                is_nft: false,
+            },
+        );
+
+        Nep171Event::NftTransfer {
+            authorized_id: if is_owner {
+                None
+            } else {
+                Some(sender_id.clone())
+            },
+            old_owner_id: previous_owner.clone(),
+            new_owner_id: receiver_id.clone(),
+            token_ids: vec![workflow_id.to_string()],
+            memo,
+        }
+        .emit();
+
+        (previous_owner, previous_approvals)
+    }
 }
