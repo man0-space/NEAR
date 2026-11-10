@@ -1547,4 +1547,95 @@ impl WorkflowContract {
 
         workflow_id
     }
+
+    fn internal_add_agent_to_workflow(
+        &mut self,
+        caller: AccountId,
+        workflow_id: u64,
+        agent_id: u64,
+        available_budget: Option<u128>,
+    ) -> u128 {
+        let root_owner = self.owner_of(workflow_id);
+        man0_require!(caller == root_owner, Man0Error::Unauthorized);
+
+        let candidate = Child {
+            contract_id: self.factory.clone(),
+            token_id: agent_id,
+        };
+        let mut children = self
+            .active_children
+            .get(&workflow_id)
+            .cloned()
+            .unwrap_or_default();
+        man0_require!(
+            !children.contains(&candidate),
+            Man0Error::ChildAlreadyNested
+        );
+
+        let (price, agent_creator) = if let Some(cached) = self.cached_agents.get(&agent_id) {
+            man0_require!(cached.exists, Man0Error::AgentNotFound);
+            (cached.license_price.0, cached.creator.clone())
+        } else {
+            (0u128, self.treasury.clone())
+        };
+
+        if let Some(budget) = available_budget {
+            man0_require!(budget >= price, Man0Error::InsufficientDeposit);
+        }
+
+        children.push(candidate);
+        self.active_children.insert(workflow_id, children);
+        self.agent_license_prices.insert(
+            WorkflowAgentPair {
+                workflow_id,
+                agent_id,
+            },
+            price,
+        );
+
+        let wf = self.workflows.get_mut(&workflow_id).unwrap();
+        wf.total_price = wf
+            .total_price
+            .checked_add(price)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+
+        if price > 0 {
+            let treasury_fee = price.checked_mul(TREASURY_FEE_BPS).unwrap() / BPS_DENOMINATOR;
+            let creator_share = price.saturating_sub(treasury_fee);
+            if treasury_fee > 0 {
+                self.internal_payout(
+                    self.treasury.clone(),
+                    treasury_fee,
+                    "Workflow license treasury fee",
+                );
+            }
+            if creator_share > 0 {
+                self.internal_payout(
+                    agent_creator,
+                    creator_share,
+                    "Workflow license creator payout",
+                );
+            }
+        }
+
+        if self.sync_factory_xcc {
+            let _ = ext_factory::ext(self.factory.clone())
+                .with_static_gas(GAS_FOR_CONSUME_LICENSE)
+                .consume_license(agent_id, env::current_account_id(), workflow_id)
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(GAS_FOR_CALLBACK)
+                        .on_consume_license(workflow_id, agent_id, U128(price)),
+                );
+        }
+
+        Man0Event::AgentAddedToWorkflow {
+            workflow_id,
+            agent_id,
+            license_price: U128(price),
+        }
+        .emit();
+
+        price
+    }
 }
