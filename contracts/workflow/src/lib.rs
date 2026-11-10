@@ -1678,4 +1678,126 @@ impl WorkflowContract {
             }
         }
     }
+
+    fn internal_create_rfa(
+        &mut self,
+        publisher: AccountId,
+        workflow_id: u64,
+        title: String,
+        description: String,
+        required_skills: Vec<String>,
+        offer_amount: u128,
+    ) -> u64 {
+        man0_require!(offer_amount > 0, Man0Error::ZeroOfferAmount);
+        man0_require!(
+            !required_skills.is_empty(),
+            Man0Error::EmptySkillsRequired
+        );
+
+        let root_owner = self.owner_of(workflow_id);
+        man0_require!(publisher == root_owner, Man0Error::Unauthorized);
+
+        let rfa_id = self.next_rfa_id;
+        self.next_rfa_id = self
+            .next_rfa_id
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        self.total_rfas = self.total_rfas.saturating_add(1);
+
+        let wf = self
+            .workflows
+            .get_mut(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic());
+        man0_require!(!wf.has_active_rfa, Man0Error::ActiveRfaExists);
+        wf.has_active_rfa = true;
+        wf.rfa_id = rfa_id;
+
+        self.complete_workflows.remove(&workflow_id);
+        self.workflows_with_rfa.insert(workflow_id);
+
+        let record = RfaRecord {
+            rfa_id,
+            workflow_id,
+            title,
+            description,
+            required_skills,
+            offer_amount,
+            publisher: publisher.clone(),
+            created_at: env::block_timestamp(),
+            status: RfaStatus::Open,
+            fulfilled_by_agent_id: 0,
+            agent_creator: None,
+        };
+        self.rfas.insert(rfa_id, record);
+        self.open_rfas.insert(rfa_id);
+
+        let mut by_pub = self
+            .rfas_by_publisher
+            .get(&publisher)
+            .cloned()
+            .unwrap_or_default();
+        by_pub.push(rfa_id);
+        self.rfas_by_publisher.insert(publisher.clone(), by_pub);
+
+        Man0Event::RfaCreated {
+            rfa_id,
+            workflow_id,
+            publisher,
+            offer_amount: U128(offer_amount),
+        }
+        .emit();
+
+        rfa_id
+    }
+
+    fn internal_resolve_workflow_rfa(&mut self, workflow_id: u64) {
+        if let Some(wf) = self.workflows.get_mut(&workflow_id) {
+            man0_require!(wf.has_active_rfa, Man0Error::NoActiveRfa);
+            wf.has_active_rfa = false;
+            self.workflows_with_rfa.remove(&workflow_id);
+            self.complete_workflows.insert(workflow_id);
+        }
+    }
+
+    fn internal_distribute_lease_fees(&mut self, lease_id: u64, total_amount: u128) {
+        let (workflow_id, leaser, is_active, end_time) = {
+            let lease = self
+                .leases
+                .get(&lease_id)
+                .unwrap_or_else(|| Man0Error::LeaseNotFound.panic());
+            (
+                lease.workflow_id,
+                lease.leaser.clone(),
+                lease.is_active,
+                lease.end_time,
+            )
+        };
+        man0_require!(
+            is_active && env::block_timestamp() < end_time,
+            Man0Error::LeaseNotActive
+        );
+
+        let wf_creator = self
+            .workflows
+            .get(&workflow_id)
+            .unwrap_or_else(|| Man0Error::WorkflowNotFound.panic())
+            .creator
+            .clone();
+
+        let (creator_share, leaser_share) = self.calculate_fee_split(lease_id, U128(total_amount));
+        if creator_share.0 > 0 {
+            self.internal_payout(wf_creator, creator_share.0, "Lease creator fee");
+        }
+        if leaser_share.0 > 0 {
+            self.internal_payout(leaser, leaser_share.0, "Lease leaser share");
+        }
+
+        Man0Event::LeaseFeesDistributed {
+            lease_id,
+            workflow_id,
+            creator_amount: creator_share,
+            leaser_amount: leaser_share,
+        }
+        .emit();
+    }
 }
