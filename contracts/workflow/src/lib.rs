@@ -1889,3 +1889,169 @@ impl WorkflowContract {
         (previous_owner, previous_approvals)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    fn acc(name: &str) -> AccountId {
+        name.parse().unwrap()
+    }
+
+    fn setup_ctx(predecessor: &AccountId, deposit_yocto: u128, timestamp_ns: u64) {
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("workflow.testnet"))
+            .predecessor_account_id(predecessor.clone())
+            .signer_account_id(predecessor.clone())
+            .account_balance(NearToken::from_near(100))
+            .attached_deposit(NearToken::from_yoctonear(deposit_yocto))
+            .block_timestamp(timestamp_ns);
+        testing_env!(builder.build());
+    }
+
+    fn setup_contract() -> WorkflowContract {
+        let admin = acc("admin.testnet");
+        let treasury = acc("treasury.testnet");
+        let factory = acc("factory.testnet");
+        let usdc = acc("usdc.testnet");
+
+        setup_ctx(&admin, 0, 1_000);
+        let mut contract = WorkflowContract::new(admin, treasury, factory, Some(usdc));
+        contract.set_sync_factory_xcc(false);
+
+        for (agent_id, price, creator) in [
+            (1u64, 500_000u128, "creator1.testnet"),
+            (2u64, 300_000u128, "creator2.testnet"),
+            (3u64, 200_000u128, "creator3.testnet"),
+        ] {
+            contract.cache_agent_info(
+                agent_id,
+                AgentPermissionInfo {
+                    exists: true,
+                    owner: acc(creator),
+                    creator: acc(creator),
+                    agent_wallet: creator.to_string(),
+                    is_approved_operator: false,
+                    license_price: U128(price),
+                    is_warped: false,
+                    warp_creator: None,
+                },
+            );
+        }
+        contract
+    }
+
+    fn default_params() -> MintWorkflowParams {
+        MintWorkflowParams {
+            title: "Autonomous Pipeline".to_string(),
+            description: "Multi-agent orchestration".to_string(),
+            banner: "ipfs://banner".to_string(),
+            workflow_card_uri: "ipfs://card".to_string(),
+            units: 50,
+            lease_enabled: true,
+            lease_duration: 30,
+            lease_percent: 15,
+            has_coordinator: true,
+            coordinator_model: "deepseek-r2".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_mint_workflow_add_remove_agents_and_units() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), vec![1, 2]);
+        assert_eq!(wf_id, 1);
+        assert_eq!(contract.total_workflows(), 1);
+        assert_eq!(contract.get_agent_count(wf_id), 2);
+        assert_eq!(contract.get_workflow_agents(wf_id), vec![1, 2]);
+
+        let view = contract.get_workflow(wf_id).unwrap();
+        assert_eq!(view.total_price, U128(800_000));
+        assert!(contract.is_complete(wf_id));
+
+        // Add agent 3 (200_000)
+        setup_ctx(&alice, 0, 3_000);
+        contract.add_agent_to_workflow(wf_id, 3);
+        assert_eq!(contract.get_agent_count(wf_id), 3);
+        assert_eq!(
+            contract.get_workflow(wf_id).unwrap().total_price,
+            U128(1_000_000)
+        );
+
+        // Remove agent 2 (300_000)
+        setup_ctx(&alice, 0, 4_000);
+        contract.remove_agent_from_workflow(wf_id, 2);
+        assert_eq!(contract.get_workflow_agents(wf_id), vec![1, 3]);
+        assert_eq!(
+            contract.get_workflow(wf_id).unwrap().total_price,
+            U128(700_000)
+        );
+
+        // Consume unit
+        assert_eq!(contract.consume_unit(wf_id), 1);
+        assert_eq!(contract.get_workflow(wf_id).unwrap().units_minted, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ZERO_UNITS")]
+    fn test_mint_workflow_rejects_zero_units() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 2_000);
+        let mut params = default_params();
+        params.units = 0;
+        contract.mint_workflow(params, Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_INVALID_LEASE_PERCENT")]
+    fn test_mint_workflow_rejects_lease_percent_above_20() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 2_000);
+        let mut params = default_params();
+        params.lease_percent = 21;
+        contract.mint_workflow(params, Vec::new());
+    }
+
+    #[test]
+    fn test_erc7401_nesting_propose_accept_reject_unnest_and_recursive_owner() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let parent_wf = contract.mint_workflow(default_params(), Vec::new());
+        let child_wf = contract.mint_workflow(default_params(), Vec::new());
+
+        let wf_contract = acc("workflow.testnet");
+        contract.propose_child(parent_wf, wf_contract.clone(), child_wf);
+        assert_eq!(contract.pending_children_of(parent_wf).len(), 1);
+
+        // Root owner of child_wf now resolves through parent_wf to alice!
+        assert_eq!(contract.owner_of(child_wf), alice);
+
+        contract.accept_child(parent_wf, 0, wf_contract.clone(), child_wf);
+        assert_eq!(contract.pending_children_of(parent_wf).len(), 0);
+        assert_eq!(contract.children_of(parent_wf).len(), 1);
+
+        // Unnest child_wf to bob
+        contract.unnest_child(
+            parent_wf,
+            0,
+            wf_contract,
+            child_wf,
+            bob.clone(),
+            false,
+            None,
+        );
+        assert_eq!(contract.children_of(parent_wf).len(), 0);
+        assert_eq!(contract.owner_of(child_wf), bob);
+    }
+}
