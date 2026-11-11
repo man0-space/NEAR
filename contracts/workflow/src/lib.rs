@@ -2108,4 +2108,35 @@ mod tests {
         );
         assert!(contract.is_complete(wf_id));
     }
+
+    #[test]
+    fn test_lease_lifecycle_fee_split_and_expiration() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), Vec::new());
+
+        setup_ctx(&bob, 0, 10_000);
+        let lease_id = contract.create_lease(wf_id, 10);
+        assert_eq!(lease_id, 1);
+        assert!(contract.is_leased(wf_id));
+        assert_eq!(contract.get_active_lease_for_workflow(wf_id), lease_id);
+
+        // Creator percent is 15% -> 150 to creator, 850 to leaser
+        let (creator_amt, leaser_amt) = contract.calculate_fee_split(lease_id, U128(1_000));
+        assert_eq!(creator_amt, U128(150));
+        assert_eq!(leaser_amt, U128(850));
+
+        setup_ctx(&bob, 0, 15_000);
+        contract.distribute_lease_fees(lease_id, U128(1_000));
+
+        // Fast-forward past 10 days -> lease expires
+        let expired_ts = 10_000 + 10 * NANOS_PER_DAY + 1;
+        setup_ctx(&alice, 0, expired_ts);
+        assert!(!contract.is_leased(wf_id));
+        contract.expire_lease_if_needed(lease_id);
+        assert!(!contract.get_lease(lease_id).unwrap().is_active);
+    }
 }
