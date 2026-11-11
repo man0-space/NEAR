@@ -2139,4 +2139,252 @@ mod tests {
         contract.expire_lease_if_needed(lease_id);
         assert!(!contract.get_lease(lease_id).unwrap().is_active);
     }
+
+    #[test]
+    fn test_nep141_ft_on_transfer_settlement_and_refund() {
+        let mut contract = setup_contract();
+        let usdc = acc("usdc.testnet");
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&usdc, 0, 2_000);
+        let msg = serde_json::json!({
+            "action": "mint_workflow",
+            "params": default_params(),
+            "agent_ids": [1, 2]
+        })
+        .to_string();
+
+        // Send 1_000_000 USDC for agents costing 500_000 + 300_000 = 800_000 -> refund 200_000
+        let PromiseOrValue::Value(refund) =
+            contract.ft_on_transfer(alice.clone(), U128(1_000_000), msg)
+        else {
+            panic!("Expected Value");
+        };
+        assert_eq!(refund, U128(200_000));
+        assert_eq!(contract.total_workflows(), 1);
+
+        // Add agent 3 (200_000) via NEP-141 ft_on_transfer with 250_000 USDC -> refund 50_000
+        let add_msg = serde_json::json!({
+            "action": "add_agent_to_workflow",
+            "workflow_id": 1,
+            "agent_id": 3
+        })
+        .to_string();
+        let PromiseOrValue::Value(add_refund) =
+            contract.ft_on_transfer(alice, U128(250_000), add_msg)
+        else {
+            panic!("Expected Value");
+        };
+        assert_eq!(add_refund, U128(50_000));
+        assert_eq!(contract.get_agent_count(1), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_INSUFFICIENT_DEPOSIT")]
+    fn test_nep141_ft_on_transfer_insufficient_usdc_panics() {
+        let mut contract = setup_contract();
+        let usdc = acc("usdc.testnet");
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&usdc, 0, 2_000);
+        let msg = serde_json::json!({
+            "action": "mint_workflow",
+            "params": default_params(),
+            "agent_ids": [1, 2]
+        })
+        .to_string();
+
+        // Agents 1 + 2 cost 800_000 USDC; sending only 700_000 USDC must panic
+        let _ = contract.ft_on_transfer(alice, U128(700_000), msg);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_WORKFLOW_UNITS_EXHAUSTED")]
+    fn test_consume_unit_exhaustion_panics() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 2_000);
+        let mut params = default_params();
+        params.units = 2;
+        let wf_id = contract.mint_workflow(params, Vec::new());
+        assert_eq!(contract.consume_unit(wf_id), 1);
+        assert_eq!(contract.consume_unit(wf_id), 2);
+        contract.consume_unit(wf_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NESTING_CYCLE_DETECTED")]
+    fn test_transitive_nesting_cycle_rejected() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let wf_contract = acc("workflow.testnet");
+        setup_ctx(&alice, 0, 2_000);
+
+        let wf1 = contract.mint_workflow(default_params(), Vec::new());
+        let wf2 = contract.mint_workflow(default_params(), Vec::new());
+        let wf3 = contract.mint_workflow(default_params(), Vec::new());
+
+        // Nest wf2 under wf1, and wf3 under wf2
+        contract.propose_child(wf1, wf_contract.clone(), wf2);
+        contract.accept_child(wf1, 0, wf_contract.clone(), wf2);
+
+        contract.propose_child(wf2, wf_contract.clone(), wf3);
+        contract.accept_child(wf2, 0, wf_contract.clone(), wf3);
+
+        // Attempting to propose wf1 under wf3 creates a 3-node cycle -> must panic
+        contract.propose_child(wf3, wf_contract, wf1);
+    }
+
+    #[test]
+    fn test_deep_nesting_root_owner_updates_on_parent_transfer() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        let wf_contract = acc("workflow.testnet");
+        setup_ctx(&alice, 0, 2_000);
+
+        let wf1 = contract.mint_workflow(default_params(), Vec::new());
+        let wf2 = contract.mint_workflow(default_params(), Vec::new());
+        let wf3 = contract.mint_workflow(default_params(), Vec::new());
+
+        contract.propose_child(wf1, wf_contract.clone(), wf2);
+        contract.accept_child(wf1, 0, wf_contract.clone(), wf2);
+        contract.propose_child(wf2, wf_contract.clone(), wf3);
+        contract.accept_child(wf2, 0, wf_contract, wf3);
+
+        assert_eq!(contract.owner_of(wf3), alice);
+
+        // Transfer root workflow wf1 to bob -> wf3's resolved owner is now bob!
+        setup_ctx(&alice, 1, 2_500);
+        contract.nft_transfer(bob.clone(), wf1.to_string(), None, None);
+        assert_eq!(contract.owner_of(wf1), bob);
+        assert_eq!(contract.owner_of(wf2), bob);
+        assert_eq!(contract.owner_of(wf3), bob);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_MAX_PENDING_CHILDREN_REACHED")]
+    fn test_max_pending_children_limit_enforced() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let wf_contract = acc("workflow.testnet");
+        setup_ctx(&alice, 0, 2_000);
+
+        let parent = contract.mint_workflow(default_params(), Vec::new());
+        let c1 = contract.mint_workflow(default_params(), Vec::new());
+        let c2 = contract.mint_workflow(default_params(), Vec::new());
+
+        contract.set_max_pending_children(parent, 1);
+        contract.propose_child(parent, wf_contract.clone(), c1);
+        contract.propose_child(parent, wf_contract, c2);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ACTIVE_RFA_EXISTS")]
+    fn test_duplicate_active_rfa_on_same_workflow_rejected() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), Vec::new());
+        contract.create_rfa(
+            wf_id,
+            "RFA 1".to_string(),
+            "Desc".to_string(),
+            vec!["s1".to_string()],
+            U128(500),
+        );
+        contract.create_rfa(
+            wf_id,
+            "RFA 2".to_string(),
+            "Desc".to_string(),
+            vec!["s1".to_string()],
+            U128(500),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_WORKFLOW_ALREADY_LEASED")]
+    fn test_concurrent_active_lease_rejected() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        let charlie = acc("charlie.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), Vec::new());
+
+        setup_ctx(&bob, 0, 3_000);
+        contract.create_lease(wf_id, 5);
+
+        setup_ctx(&charlie, 0, 4_000);
+        contract.create_lease(wf_id, 5);
+    }
+
+    #[test]
+    fn test_re_lease_after_previous_lease_expires() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        let charlie = acc("charlie.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), Vec::new());
+
+        setup_ctx(&bob, 0, 10_000);
+        let lease1 = contract.create_lease(wf_id, 5);
+
+        // Advance time past 5 days without explicitly calling expire_lease_if_needed
+        let after_5_days = 10_000 + 5 * NANOS_PER_DAY + 100;
+        setup_ctx(&charlie, 0, after_5_days);
+        let lease2 = contract.create_lease(wf_id, 10);
+        assert_eq!(lease2, 2);
+        assert!(!contract.get_lease(lease1).unwrap().is_active);
+        assert!(contract.get_lease(lease2).unwrap().is_active);
+        assert_eq!(contract.get_active_lease_for_workflow(wf_id), lease2);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_INVALID_PAYMENT_TOKEN")]
+    fn test_ft_on_transfer_rejects_unknown_token() {
+        let mut contract = setup_contract();
+        let fake_token = acc("fake-token.testnet");
+        let alice = acc("alice.testnet");
+        setup_ctx(&fake_token, 0, 2_000);
+        let _ = contract.ft_on_transfer(alice, U128(1_000), "{}".to_string());
+    }
+
+    #[test]
+    fn test_xcc_on_consume_license_rollback_on_failure() {
+        use near_sdk::PromiseResult;
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), vec![1]);
+        assert_eq!(contract.get_agent_count(wf_id), 1);
+        assert_eq!(
+            contract.get_workflow(wf_id).unwrap().total_price,
+            U128(500_000)
+        );
+
+        // Simulate failed XCC callback from factory::consume_license
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("workflow.testnet"))
+            .predecessor_account_id(acc("workflow.testnet"))
+            .signer_account_id(alice);
+
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Failed],
+        );
+
+        contract.on_consume_license(wf_id, 1, U128(500_000));
+        // Agent 1 is removed from workflow and total_price is rolled back to 0!
+        assert_eq!(contract.get_agent_count(wf_id), 0);
+        assert_eq!(contract.get_workflow(wf_id).unwrap().total_price, U128(0));
+    }
 }
