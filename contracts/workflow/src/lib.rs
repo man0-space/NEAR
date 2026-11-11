@@ -2054,4 +2054,58 @@ mod tests {
         assert_eq!(contract.children_of(parent_wf).len(), 0);
         assert_eq!(contract.owner_of(child_wf), bob);
     }
+
+    #[test]
+    fn test_rfa_escrow_submit_accept_and_cancel_lifecycle() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let creator1 = acc("creator1.testnet");
+
+        setup_ctx(&alice, 0, 2_000);
+        let wf_id = contract.mint_workflow(default_params(), Vec::new());
+
+        let rfa_id = contract.create_rfa(
+            wf_id,
+            "Need Solidity Auditor Agent".to_string(),
+            "Must audit EVM and NEAR contracts".to_string(),
+            vec!["rust".to_string(), "near".to_string()],
+            U128(1_000_000),
+        );
+        assert_eq!(rfa_id, 1);
+        assert!(contract.has_active_rfa(wf_id));
+        assert!(!contract.is_complete(wf_id));
+        assert_eq!(contract.get_open_rfas(), vec![rfa_id]);
+
+        // Creator1 submits agent 1
+        setup_ctx(&creator1, 0, 3_000);
+        contract.submit_agent(rfa_id, 1);
+        assert_eq!(contract.get_submissions(rfa_id).len(), 1);
+
+        // Alice accepts agent 1
+        setup_ctx(&alice, 0, 4_000);
+        contract.accept_agent(rfa_id, 1);
+
+        let rfa_view = contract.get_rfa(rfa_id).unwrap();
+        assert_eq!(rfa_view.status, RfaStatus::Fulfilled);
+        assert_eq!(rfa_view.fulfilled_by_agent_id, 1);
+        assert_eq!(rfa_view.agent_creator, Some(creator1));
+        assert!(contract.is_complete(wf_id));
+        assert!(contract.get_open_rfas().is_empty());
+
+        // Test RFA cancellation on a new RFA
+        setup_ctx(&alice, 0, 5_000);
+        let rfa2 = contract.create_rfa(
+            wf_id,
+            "Second RFA".to_string(),
+            "Cancelable".to_string(),
+            vec!["nlp".to_string()],
+            U128(500_000),
+        );
+        contract.cancel_rfa(rfa2);
+        assert_eq!(
+            contract.get_rfa(rfa2).unwrap().status,
+            RfaStatus::Cancelled
+        );
+        assert!(contract.is_complete(wf_id));
+    }
 }
