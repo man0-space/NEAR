@@ -465,4 +465,37 @@ impl ReputationContract {
             .cloned()
             .unwrap_or_default()
     }
+
+    pub fn set_factory(&mut self, new_factory: AccountId) {
+        man0_require!(
+            env::predecessor_account_id() == self.admin,
+            Man0Error::Unauthorized
+        );
+        self.factory = new_factory;
+    }
+
+    pub fn set_verify_via_xcc(&mut self, enabled: bool) {
+        man0_require!(
+            env::predecessor_account_id() == self.admin,
+            Man0Error::Unauthorized
+        );
+        self.verify_via_xcc = enabled;
+    }
+
+    pub fn cache_agent_permissions(&mut self, agent_id: u64, info: AgentPermissionInfo) {
+        let caller = env::predecessor_account_id();
+        man0_require!(
+            caller == self.admin || caller == self.factory,
+            Man0Error::Unauthorized
+        );
+        self.cached_agents.insert(agent_id, info);
+    }
+
+    pub fn get_factory(&self) -> AccountId {
+        self.factory.clone()
+    }
+
+    pub fn get_admin(&self) -> AccountId {
+        self.admin.clone()
+    }
 }
