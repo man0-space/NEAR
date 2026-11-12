@@ -174,4 +174,102 @@ impl ReputationContract {
             feedback_hash,
         )
     }
+
+    pub fn revoke_feedback(&mut self, agent_id: u64, feedback_index: u64) {
+        let caller = env::predecessor_account_id();
+        let last = self
+            .last_index
+            .get(&AgentClientPair {
+                agent_id,
+                client: caller.clone(),
+            })
+            .copied()
+            .unwrap_or(0);
+        man0_require!(
+            feedback_index > 0 && feedback_index <= last,
+            Man0Error::InvalidFeedbackIndex
+        );
+
+        let key = FeedbackKey {
+            agent_id,
+            client: caller.clone(),
+            feedback_index,
+        };
+        let entry = self
+            .feedback
+            .get_mut(&key)
+            .unwrap_or_else(|| Man0Error::InvalidFeedbackIndex.panic());
+        man0_require!(!entry.is_revoked, Man0Error::FeedbackAlreadyRevoked);
+        entry.is_revoked = true;
+
+        Man0Event::FeedbackRevoked {
+            agent_id,
+            client: caller,
+            feedback_index,
+        }
+        .emit();
+    }
+
+    pub fn append_response(
+        &mut self,
+        agent_id: u64,
+        client_address: AccountId,
+        feedback_index: u64,
+        response_uri: String,
+        response_hash: String,
+    ) {
+        man0_require!(agent_id > 0, Man0Error::AgentNotFound);
+        validate_uri(&response_uri, false).unwrap_or_else(|e| e.panic());
+        if !response_hash.is_empty() {
+            let _ = hex_to_bytes32(&response_hash).unwrap_or_else(|e| e.panic());
+        }
+
+        let last = self
+            .last_index
+            .get(&AgentClientPair {
+                agent_id,
+                client: client_address.clone(),
+            })
+            .copied()
+            .unwrap_or(0);
+        man0_require!(
+            feedback_index > 0 && feedback_index <= last,
+            Man0Error::InvalidFeedbackIndex
+        );
+
+        let responder = env::predecessor_account_id();
+        let fb_key = FeedbackKey {
+            agent_id,
+            client: client_address.clone(),
+            feedback_index,
+        };
+        let mut resp_list = self
+            .responders
+            .get(&fb_key)
+            .cloned()
+            .unwrap_or_default();
+        if !resp_list.contains(&responder) {
+            resp_list.push(responder.clone());
+            self.responders.insert(fb_key, resp_list);
+        }
+
+        let cnt_key = ResponseCountKey {
+            agent_id,
+            client: client_address.clone(),
+            feedback_index,
+            responder: responder.clone(),
+        };
+        let prev = self.response_counts.get(&cnt_key).copied().unwrap_or(0);
+        self.response_counts
+            .insert(cnt_key, prev.saturating_add(1));
+
+        Man0Event::ResponseAppended {
+            agent_id,
+            client: client_address,
+            feedback_index,
+            responder,
+            response_uri,
+        }
+        .emit();
+    }
 }
