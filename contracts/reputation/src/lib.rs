@@ -272,4 +272,122 @@ impl ReputationContract {
         }
         .emit();
     }
+
+    // =========================================================================
+    // View Methods
+    // =========================================================================
+
+    pub fn get_last_index(&self, agent_id: u64, client_address: AccountId) -> u64 {
+        self.last_index
+            .get(&AgentClientPair {
+                agent_id,
+                client: client_address,
+            })
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn read_feedback(
+        &self,
+        agent_id: u64,
+        client_address: AccountId,
+        feedback_index: u64,
+    ) -> Option<FeedbackView> {
+        self.feedback
+            .get(&FeedbackKey {
+                agent_id,
+                client: client_address,
+                feedback_index,
+            })
+            .map(|r| r.to_view())
+    }
+
+    pub fn read_all_feedback(
+        &self,
+        agent_id: u64,
+        client_addresses: Option<Vec<AccountId>>,
+        tag1: Option<String>,
+        tag2: Option<String>,
+        include_revoked: Option<bool>,
+    ) -> Vec<FeedbackView> {
+        let clients = client_addresses.unwrap_or_else(|| {
+            self.clients
+                .get(&agent_id)
+                .cloned()
+                .unwrap_or_default()
+        });
+        let filter_t1 = tag1.unwrap_or_default();
+        let filter_t2 = tag2.unwrap_or_default();
+        let inc_revoked = include_revoked.unwrap_or(false);
+
+        let mut out = Vec::new();
+        for client in clients {
+            let last = self.get_last_index(agent_id, client.clone());
+            for idx in 1..=last {
+                if let Some(entry) = self.feedback.get(&FeedbackKey {
+                    agent_id,
+                    client: client.clone(),
+                    feedback_index: idx,
+                }) {
+                    if !inc_revoked && entry.is_revoked {
+                        continue;
+                    }
+                    if !filter_t1.is_empty() && entry.tag1 != filter_t1 {
+                        continue;
+                    }
+                    if !filter_t2.is_empty() && entry.tag2 != filter_t2 {
+                        continue;
+                    }
+                    out.push(entry.to_view());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn get_summary(
+        &self,
+        agent_id: u64,
+        client_addresses: Vec<AccountId>,
+        tag1: Option<String>,
+        tag2: Option<String>,
+    ) -> SummaryResult {
+        man0_require!(
+            !client_addresses.is_empty(),
+            Man0Error::ClientAddressesRequired
+        );
+        let filter_t1 = tag1.unwrap_or_default();
+        let filter_t2 = tag2.unwrap_or_default();
+
+        let mut entries = Vec::new();
+        for client in client_addresses {
+            let last = self.get_last_index(agent_id, client.clone());
+            for idx in 1..=last {
+                if let Some(entry) = self.feedback.get(&FeedbackKey {
+                    agent_id,
+                    client: client.clone(),
+                    feedback_index: idx,
+                }) {
+                    if entry.is_revoked {
+                        continue;
+                    }
+                    if !filter_t1.is_empty() && entry.tag1 != filter_t1 {
+                        continue;
+                    }
+                    if !filter_t2.is_empty() && entry.tag2 != filter_t2 {
+                        continue;
+                    }
+                    entries.push((entry.value, entry.value_decimals));
+                }
+            }
+        }
+
+        let (count, val, mode) =
+            aggregate_summary(&entries).unwrap_or_else(|e| e.panic());
+        SummaryResult {
+            count,
+            summary_value: I128(val),
+            summary_value_decimals: mode,
+        }
+    }
 }
