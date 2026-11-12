@@ -74,4 +74,104 @@ impl ReputationContract {
             cached_agents: LookupMap::new(StorageKey::CachedAgents),
         }
     }
+
+    pub fn give_feedback(
+        &mut self,
+        agent_id: u64,
+        value: I128,
+        value_decimals: u8,
+        tag1: String,
+        tag2: String,
+        endpoint: String,
+        feedback_uri: String,
+        feedback_hash: String,
+    ) -> PromiseOrValue<u64> {
+        man0_require!(agent_id > 0, Man0Error::AgentNotFound);
+        validate_feedback_value(value.0, value_decimals).unwrap_or_else(|e| e.panic());
+        validate_uri(&feedback_uri, true).unwrap_or_else(|e| e.panic());
+        let parsed_hash = if feedback_hash.is_empty() {
+            [0u8; 32]
+        } else {
+            hex_to_bytes32(&feedback_hash).unwrap_or_else(|e| e.panic())
+        };
+
+        let caller = env::predecessor_account_id();
+
+        if !self.verify_via_xcc {
+            let info = self
+                .cached_agents
+                .get(&agent_id)
+                .cloned()
+                .unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+            Self::assert_not_self_feedback(&caller, &info);
+            let idx = self.internal_record_feedback(
+                agent_id,
+                caller,
+                value.0,
+                value_decimals,
+                tag1,
+                tag2,
+                endpoint,
+                feedback_uri,
+                parsed_hash,
+            );
+            return PromiseOrValue::Value(idx);
+        }
+
+        let promise = ext_factory::ext(self.factory.clone())
+            .with_static_gas(GAS_FOR_GET_PERMISSIONS)
+            .get_agent_permissions(agent_id, caller.clone())
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_ON_GIVE_FEEDBACK)
+                    .on_give_feedback(
+                        agent_id,
+                        caller,
+                        value,
+                        value_decimals,
+                        tag1,
+                        tag2,
+                        endpoint,
+                        feedback_uri,
+                        parsed_hash,
+                    ),
+            );
+        PromiseOrValue::Promise(promise)
+    }
+
+    #[private]
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_give_feedback(
+        &mut self,
+        agent_id: u64,
+        caller: AccountId,
+        value: I128,
+        value_decimals: u8,
+        tag1: String,
+        tag2: String,
+        endpoint: String,
+        feedback_uri: String,
+        feedback_hash: [u8; 32],
+    ) -> u64 {
+        let result_bytes = env::promise_result_checked(0, 4096)
+            .unwrap_or_else(|_| Man0Error::CrossContractCallFailed.panic());
+        let info: Option<AgentPermissionInfo> = serde_json::from_slice(&result_bytes)
+            .unwrap_or_else(|_| Man0Error::CrossContractCallFailed.panic());
+        let info = info.unwrap_or_else(|| Man0Error::AgentNotFound.panic());
+
+        Self::assert_not_self_feedback(&caller, &info);
+        self.cached_agents.insert(agent_id, info);
+
+        self.internal_record_feedback(
+            agent_id,
+            caller,
+            value.0,
+            value_decimals,
+            tag1,
+            tag2,
+            endpoint,
+            feedback_uri,
+            feedback_hash,
+        )
+    }
 }
