@@ -498,4 +498,92 @@ impl ReputationContract {
     pub fn get_admin(&self) -> AccountId {
         self.admin.clone()
     }
+
+    // =========================================================================
+    // Internal Helpers
+    // =========================================================================
+
+    fn assert_not_self_feedback(caller: &AccountId, info: &AgentPermissionInfo) {
+        man0_require!(info.exists, Man0Error::AgentNotFound);
+        man0_require!(
+            caller != &info.owner
+                && caller.as_str() != info.agent_wallet.as_str()
+                && !info.is_approved_operator,
+            Man0Error::SelfFeedbackNotAllowed
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn internal_record_feedback(
+        &mut self,
+        agent_id: u64,
+        client: AccountId,
+        value: i128,
+        value_decimals: u8,
+        tag1: String,
+        tag2: String,
+        endpoint: String,
+        feedback_uri: String,
+        feedback_hash: [u8; 32],
+    ) -> u64 {
+        let pair = AgentClientPair {
+            agent_id,
+            client: client.clone(),
+        };
+        let prev = self.last_index.get(&pair).copied().unwrap_or(0);
+        let next_idx = prev
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+        self.last_index.insert(pair, next_idx);
+
+        if prev == 0 {
+            let mut client_list = self
+                .clients
+                .get(&agent_id)
+                .cloned()
+                .unwrap_or_default();
+            if !client_list.contains(&client) {
+                client_list.push(client.clone());
+                self.clients.insert(agent_id, client_list);
+            }
+        }
+
+        let record = FeedbackRecord {
+            agent_id,
+            client: client.clone(),
+            feedback_index: next_idx,
+            value,
+            value_decimals,
+            tag1: tag1.clone(),
+            tag2: tag2.clone(),
+            endpoint: endpoint.clone(),
+            feedback_uri: feedback_uri.clone(),
+            feedback_hash,
+            is_revoked: false,
+            created_at: env::block_timestamp(),
+        };
+        self.feedback.insert(
+            FeedbackKey {
+                agent_id,
+                client: client.clone(),
+                feedback_index: next_idx,
+            },
+            record,
+        );
+
+        Man0Event::NewFeedback {
+            agent_id,
+            client,
+            feedback_index: next_idx,
+            value: I128(value),
+            value_decimals,
+            tag1,
+            tag2,
+            endpoint,
+            feedback_uri,
+        }
+        .emit();
+
+        next_idx
+    }
 }
