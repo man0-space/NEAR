@@ -390,4 +390,79 @@ impl ReputationContract {
             summary_value_decimals: mode,
         }
     }
+
+    pub fn get_response_count(
+        &self,
+        agent_id: u64,
+        client_address: Option<AccountId>,
+        feedback_index: Option<u64>,
+        responders: Option<Vec<AccountId>>,
+    ) -> u64 {
+        let client_list = match client_address {
+            Some(c) => vec![c],
+            None => self.clients.get(&agent_id).cloned().unwrap_or_default(),
+        };
+        let resp_filter = responders.unwrap_or_default();
+        let idx_filter = feedback_index.unwrap_or(0);
+
+        let mut total: u64 = 0;
+        for client in client_list {
+            let last = self.get_last_index(agent_id, client.clone());
+            let range = if idx_filter > 0 {
+                if idx_filter <= last {
+                    idx_filter..=idx_filter
+                } else {
+                    1..=0
+                }
+            } else {
+                1..=last
+            };
+            for idx in range {
+                let fb_key = FeedbackKey {
+                    agent_id,
+                    client: client.clone(),
+                    feedback_index: idx,
+                };
+                let candidates = if resp_filter.is_empty() {
+                    self.responders.get(&fb_key).cloned().unwrap_or_default()
+                } else {
+                    resp_filter.clone()
+                };
+                for r in candidates {
+                    total = total.saturating_add(
+                        self.response_counts
+                            .get(&ResponseCountKey {
+                                agent_id,
+                                client: client.clone(),
+                                feedback_index: idx,
+                                responder: r,
+                            })
+                            .copied()
+                            .unwrap_or(0),
+                    );
+                }
+            }
+        }
+        total
+    }
+
+    pub fn get_clients(&self, agent_id: u64) -> Vec<AccountId> {
+        self.clients.get(&agent_id).cloned().unwrap_or_default()
+    }
+
+    pub fn get_responders(
+        &self,
+        agent_id: u64,
+        client_address: AccountId,
+        feedback_index: u64,
+    ) -> Vec<AccountId> {
+        self.responders
+            .get(&FeedbackKey {
+                agent_id,
+                client: client_address,
+                feedback_index,
+            })
+            .cloned()
+            .unwrap_or_default()
+    }
 }
