@@ -587,3 +587,178 @@ impl ReputationContract {
         next_idx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use man0::hash::bytes32_to_hex;
+    use near_sdk::json_types::U128;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    fn acc(name: &str) -> AccountId {
+        name.parse().unwrap()
+    }
+
+    fn setup_ctx(predecessor: &AccountId, timestamp_ns: u64) {
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("reputation.testnet"))
+            .predecessor_account_id(predecessor.clone())
+            .signer_account_id(predecessor.clone())
+            .block_timestamp(timestamp_ns);
+        testing_env!(builder.build());
+    }
+
+    fn setup_contract() -> ReputationContract {
+        let admin = acc("admin.testnet");
+        let factory = acc("factory.testnet");
+        setup_ctx(&admin, 1_000);
+        let mut contract = ReputationContract::new(admin.clone(), factory);
+        contract.set_verify_via_xcc(false);
+        contract.cache_agent_permissions(
+            1,
+            AgentPermissionInfo {
+                exists: true,
+                owner: acc("owner.testnet"),
+                creator: acc("owner.testnet"),
+                agent_wallet: "agent-wallet.testnet".to_string(),
+                is_approved_operator: false,
+                license_price: U128(100),
+                is_warped: false,
+                warp_creator: None,
+            },
+        );
+        contract
+    }
+
+    #[test]
+    fn test_give_revoke_append_and_summary_happy_path() {
+        let mut contract = setup_contract();
+        let bob = acc("bob.testnet");
+        let charlie = acc("charlie.testnet");
+        let responder = acc("responder.testnet");
+
+        setup_ctx(&bob, 2_000);
+        let PromiseOrValue::Value(idx1) = contract.give_feedback(
+            1,
+            I128(950),
+            2, // 9.50
+            "quality".to_string(),
+            "speed".to_string(),
+            "/v1/chat".to_string(),
+            "ipfs://fb1".to_string(),
+            bytes32_to_hex(&[0x11; 32]),
+        ) else {
+            panic!("Expected value");
+        };
+        assert_eq!(idx1, 1);
+
+        let PromiseOrValue::Value(idx2) = contract.give_feedback(
+            1,
+            I128(850),
+            2, // 8.50
+            "quality".to_string(),
+            "cost".to_string(),
+            "/v1/chat".to_string(),
+            "ipfs://fb2".to_string(),
+            String::new(),
+        ) else {
+            panic!("Expected value");
+        };
+        assert_eq!(idx2, 2);
+
+        setup_ctx(&charlie, 3_000);
+        let PromiseOrValue::Value(c_idx1) = contract.give_feedback(
+            1,
+            I128(6_000_000),
+            6, // 6.000000
+            "quality".to_string(),
+            "speed".to_string(),
+            "/v1/chat".to_string(),
+            "ipfs://fb3".to_string(),
+            String::new(),
+        ) else {
+            panic!("Expected value");
+        };
+        assert_eq!(c_idx1, 1);
+
+        // Summary across bob & charlie: (9.50 + 8.50 + 6.00) / 3 = 8.00 (mode decimals = 2 -> 800)
+        let summary = contract.get_summary(1, vec![bob.clone(), charlie.clone()], None, None);
+        assert_eq!(summary.count, 3);
+        assert_eq!(summary.summary_value_decimals, 2);
+        assert_eq!(summary.summary_value, I128(800));
+
+        // Filter by tag2 = "speed": (9.50 + 6.00) / 2 = 7.75
+        let speed_summary = contract.get_summary(
+            1,
+            vec![bob.clone(), charlie.clone()],
+            Some("quality".to_string()),
+            Some("speed".to_string()),
+        );
+        assert_eq!(speed_summary.count, 2);
+        assert_eq!(speed_summary.summary_value, I128(775));
+
+        // Revoke bob's second feedback (8.50)
+        setup_ctx(&bob, 4_000);
+        contract.revoke_feedback(1, 2);
+        let after_revoke = contract.get_summary(1, vec![bob.clone(), charlie.clone()], None, None);
+        assert_eq!(after_revoke.count, 2);
+        assert_eq!(after_revoke.summary_value, I128(775));
+
+        // Append response
+        setup_ctx(&responder, 5_000);
+        contract.append_response(
+            1,
+            bob.clone(),
+            1,
+            "ipfs://resp1".to_string(),
+            bytes32_to_hex(&[0x22; 32]),
+        );
+        contract.append_response(
+            1,
+            bob.clone(),
+            1,
+            "ipfs://resp2".to_string(),
+            String::new(),
+        );
+        assert_eq!(contract.get_response_count(1, None, None, None), 2);
+        assert_eq!(contract.get_responders(1, bob, 1), vec![responder]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_SELF_FEEDBACK_NOT_ALLOWED")]
+    fn test_self_feedback_by_owner_rejected() {
+        let mut contract = setup_contract();
+        let owner = acc("owner.testnet");
+        setup_ctx(&owner, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(100),
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_SELF_FEEDBACK_NOT_ALLOWED")]
+    fn test_self_feedback_by_agent_wallet_rejected() {
+        let mut contract = setup_contract();
+        let wallet = acc("agent-wallet.testnet");
+        setup_ctx(&wallet, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(100),
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+    }
+}
