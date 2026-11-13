@@ -879,4 +879,130 @@ mod tests {
         );
         contract.append_response(1, bob, 1, "   ".to_string(), String::new());
     }
+
+    #[test]
+    fn test_read_all_feedback_filters_and_revoked_toggle() {
+        let mut contract = setup_contract();
+        let bob = acc("bob.testnet");
+        setup_ctx(&bob, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(-200),
+            2,
+            "latency".to_string(),
+            "eu".to_string(),
+            String::new(),
+            "ipfs://1".to_string(),
+            String::new(),
+        );
+        let _ = contract.give_feedback(
+            1,
+            I128(400),
+            2,
+            "accuracy".to_string(),
+            "us".to_string(),
+            String::new(),
+            "ipfs://2".to_string(),
+            String::new(),
+        );
+        contract.revoke_feedback(1, 1);
+
+        let active_only = contract.read_all_feedback(1, None, None, None, Some(false));
+        assert_eq!(active_only.len(), 1);
+        assert_eq!(active_only[0].feedback_index, 2);
+
+        let with_revoked = contract.read_all_feedback(1, None, None, None, Some(true));
+        assert_eq!(with_revoked.len(), 2);
+        assert_eq!(contract.get_clients(1), vec![bob]);
+    }
+
+    #[test]
+    fn test_xcc_on_give_feedback_callback_success() {
+        use near_sdk::PromiseResult;
+        let admin = acc("admin.testnet");
+        let factory = acc("factory.testnet");
+        let bob = acc("bob.testnet");
+
+        setup_ctx(&admin, 1_000);
+        let mut contract = ReputationContract::new(admin, factory);
+
+        let info = Some(AgentPermissionInfo {
+            exists: true,
+            owner: acc("owner.testnet"),
+            creator: acc("owner.testnet"),
+            agent_wallet: "owner.testnet".to_string(),
+            is_approved_operator: false,
+            license_price: U128(500_000),
+            is_warped: false,
+            warp_creator: None,
+        });
+        let payload = serde_json::to_vec(&info).unwrap();
+
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("reputation.testnet"))
+            .predecessor_account_id(acc("reputation.testnet"))
+            .signer_account_id(bob.clone())
+            .block_timestamp(5_000);
+
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Successful(payload)],
+        );
+
+        let idx = contract.on_give_feedback(
+            1,
+            bob.clone(),
+            I128(900),
+            2,
+            "reliability".to_string(),
+            "prod".to_string(),
+            "/run".to_string(),
+            "ipfs://xcc-fb".to_string(),
+            [0x55; 32],
+        );
+        assert_eq!(idx, 1);
+        assert_eq!(contract.get_last_index(1, bob), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_CROSS_CONTRACT_CALL_FAILED")]
+    fn test_xcc_on_give_feedback_callback_failed_promise_panics() {
+        use near_sdk::PromiseResult;
+        let admin = acc("admin.testnet");
+        let factory = acc("factory.testnet");
+        let bob = acc("bob.testnet");
+
+        setup_ctx(&admin, 1_000);
+        let mut contract = ReputationContract::new(admin, factory);
+
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("reputation.testnet"))
+            .predecessor_account_id(acc("reputation.testnet"))
+            .signer_account_id(bob.clone());
+
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Failed],
+        );
+
+        contract.on_give_feedback(
+            1,
+            bob,
+            I128(900),
+            2,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            [0u8; 32],
+        );
+    }
 }
