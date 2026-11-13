@@ -761,4 +761,122 @@ mod tests {
             String::new(),
         );
     }
+
+    #[test]
+    #[should_panic(expected = "ERR_FEEDBACK_ALREADY_REVOKED")]
+    fn test_double_revoke_feedback_rejected() {
+        let mut contract = setup_contract();
+        let bob = acc("bob.testnet");
+        setup_ctx(&bob, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(500),
+            2,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+        contract.revoke_feedback(1, 1);
+        contract.revoke_feedback(1, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_CLIENT_ADDRESSES_REQUIRED")]
+    fn test_get_summary_requires_non_empty_clients() {
+        let contract = setup_contract();
+        let _ = contract.get_summary(1, Vec::new(), None, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_SELF_FEEDBACK_NOT_ALLOWED")]
+    fn test_self_feedback_by_approved_operator_rejected() {
+        let mut contract = setup_contract();
+        let admin = acc("admin.testnet");
+        let operator = acc("operator.testnet");
+        setup_ctx(&admin, 1_500);
+        contract.cache_agent_permissions(
+            2,
+            AgentPermissionInfo {
+                exists: true,
+                owner: acc("owner.testnet"),
+                creator: acc("owner.testnet"),
+                agent_wallet: "owner.testnet".to_string(),
+                is_approved_operator: true,
+                license_price: U128(0),
+                is_warped: false,
+                warp_creator: None,
+            },
+        );
+        setup_ctx(&operator, 2_000);
+        let _ = contract.give_feedback(
+            2,
+            I128(100),
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_INVALID_DECIMALS")]
+    fn test_give_feedback_decimals_above_18_rejected() {
+        let mut contract = setup_contract();
+        let bob = acc("bob.testnet");
+        setup_ctx(&bob, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(100),
+            19,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_INVALID_FEEDBACK_INDEX")]
+    fn test_revoke_feedback_wrong_author_or_index_rejected() {
+        let mut contract = setup_contract();
+        let bob = acc("bob.testnet");
+        let attacker = acc("attacker.testnet");
+        setup_ctx(&bob, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(100),
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+        setup_ctx(&attacker, 3_000);
+        contract.revoke_feedback(1, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_EMPTY_URI")]
+    fn test_append_response_empty_uri_rejected() {
+        let mut contract = setup_contract();
+        let bob = acc("bob.testnet");
+        setup_ctx(&bob, 2_000);
+        let _ = contract.give_feedback(
+            1,
+            I128(100),
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+        contract.append_response(1, bob, 1, "   ".to_string(), String::new());
+    }
 }
