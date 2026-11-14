@@ -241,4 +241,75 @@ impl ValidationContract {
     pub fn total_responses(&self) -> u64 {
         self.next_response_id.saturating_sub(1)
     }
+
+    pub fn set_factory(&mut self, new_factory: AccountId) {
+        man0_require!(
+            env::predecessor_account_id() == self.admin,
+            Man0Error::Unauthorized
+        );
+        self.factory = new_factory;
+    }
+
+    pub fn set_verify_via_xcc(&mut self, enabled: bool) {
+        man0_require!(
+            env::predecessor_account_id() == self.admin,
+            Man0Error::Unauthorized
+        );
+        self.verify_via_xcc = enabled;
+    }
+
+    pub fn get_factory(&self) -> AccountId {
+        self.factory.clone()
+    }
+
+    pub fn get_admin(&self) -> AccountId {
+        self.admin.clone()
+    }
+
+    fn internal_create_request(
+        &mut self,
+        agent_id: u64,
+        requester: AccountId,
+        validator_type: String,
+        task_hash: [u8; 32],
+        request_uri: String,
+    ) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+
+        let record = ValidationRequest {
+            request_id,
+            agent_id,
+            requester: requester.clone(),
+            validator_type: validator_type.clone(),
+            task_hash,
+            request_uri: request_uri.clone(),
+            status: ValidationStatus::Pending,
+            created_at: env::block_timestamp(),
+            response_count: 0,
+        };
+        self.requests.insert(request_id, record);
+
+        let mut list = self
+            .agent_requests
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_default();
+        list.push(request_id);
+        self.agent_requests.insert(agent_id, list);
+
+        Man0Event::ValidationRequested {
+            request_id,
+            agent_id,
+            requester,
+            validator_type,
+            request_uri,
+        }
+        .emit();
+
+        request_id
+    }
 }
