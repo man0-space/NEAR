@@ -313,3 +313,165 @@ impl ValidationContract {
         request_id
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use man0::hash::bytes32_to_hex;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    fn acc(name: &str) -> AccountId {
+        name.parse().unwrap()
+    }
+
+    fn setup_ctx(predecessor: &AccountId, timestamp_ns: u64) {
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("validation.testnet"))
+            .predecessor_account_id(predecessor.clone())
+            .signer_account_id(predecessor.clone())
+            .block_timestamp(timestamp_ns);
+        testing_env!(builder.build());
+    }
+
+    fn setup_contract() -> ValidationContract {
+        let admin = acc("admin.testnet");
+        setup_ctx(&admin, 1_000);
+        let mut contract = ValidationContract::new(admin, acc("factory.testnet"));
+        contract.set_verify_via_xcc(false);
+        contract
+    }
+
+    #[test]
+    fn test_validation_lifecycle() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let validator = acc("tee-validator.testnet");
+
+        setup_ctx(&alice, 2_000);
+        let PromiseOrValue::Value(req_id) = contract.request_validation(
+            1,
+            "TEE".to_string(),
+            bytes32_to_hex(&[0x33; 32]),
+            "ipfs://req1".to_string(),
+        ) else {
+            panic!("Expected value");
+        };
+        assert_eq!(req_id, 1);
+        assert_eq!(contract.total_requests(), 1);
+        assert_eq!(contract.get_agent_validation_requests(1), vec![1]);
+
+        setup_ctx(&validator, 3_000);
+        let resp_id = contract.respond_validation(
+            req_id,
+            true,
+            bytes32_to_hex(&[0x44; 32]),
+            "ipfs://ev1".to_string(),
+        );
+        assert_eq!(resp_id, 1);
+        assert_eq!(contract.total_responses(), 1);
+        assert_eq!(contract.get_validation_responses(req_id), vec![1]);
+
+        let req_view = contract.get_validation_request(req_id).unwrap();
+        assert_eq!(req_view.status, ValidationStatus::Completed);
+        assert_eq!(req_view.response_count, 1);
+
+        setup_ctx(&alice, 4_000);
+        contract.close_validation(req_id);
+        assert_eq!(
+            contract.get_validation_request(req_id).unwrap().status,
+            ValidationStatus::Closed
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_REQUESTER")]
+    fn test_non_requester_cannot_close() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let bob = acc("bob.testnet");
+        setup_ctx(&alice, 2_000);
+        let PromiseOrValue::Value(req_id) = contract.request_validation(
+            1,
+            "ZK".to_string(),
+            String::new(),
+            "ipfs://r".to_string(),
+        ) else {
+            panic!("Expected value");
+        };
+        setup_ctx(&bob, 3_000);
+        contract.close_validation(req_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_REQUEST_ALREADY_CLOSED")]
+    fn test_cannot_respond_to_closed_request() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let validator = acc("validator.testnet");
+        setup_ctx(&alice, 2_000);
+        let PromiseOrValue::Value(req_id) = contract.request_validation(
+            1,
+            "STAKE".to_string(),
+            String::new(),
+            "ipfs://r".to_string(),
+        ) else {
+            panic!("Expected value");
+        };
+        contract.close_validation(req_id);
+
+        setup_ctx(&validator, 3_000);
+        contract.respond_validation(req_id, false, String::new(), "ipfs://ev".to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_REQUEST_ALREADY_CLOSED")]
+    fn test_cannot_close_request_twice() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        setup_ctx(&alice, 2_000);
+        let PromiseOrValue::Value(req_id) = contract.request_validation(
+            1,
+            "TEE".to_string(),
+            String::new(),
+            "ipfs://r".to_string(),
+        ) else {
+            panic!("Expected value");
+        };
+        contract.close_validation(req_id);
+        contract.close_validation(req_id);
+    }
+
+    #[test]
+    fn test_multiple_validator_responses_per_request() {
+        let mut contract = setup_contract();
+        let alice = acc("alice.testnet");
+        let v1 = acc("v1.testnet");
+        let v2 = acc("v2.testnet");
+
+        setup_ctx(&alice, 2_000);
+        let PromiseOrValue::Value(req_id) = contract.request_validation(
+            1,
+            "ZKML".to_string(),
+            String::new(),
+            "ipfs://req".to_string(),
+        ) else {
+            panic!("Expected value");
+        };
+
+        setup_ctx(&v1, 3_000);
+        let r1 = contract.respond_validation(req_id, true, String::new(), "ipfs://ev1".to_string());
+        setup_ctx(&v2, 4_000);
+        let r2 =
+            contract.respond_validation(req_id, false, String::new(), "ipfs://ev2".to_string());
+
+        assert_eq!(contract.get_validation_responses(req_id), vec![r1, r2]);
+        assert_eq!(
+            contract.get_validation_request(req_id).unwrap().response_count,
+            2
+        );
+        assert!(contract.get_validation_response(r1).unwrap().valid);
+        assert!(!contract.get_validation_response(r2).unwrap().valid);
+    }
+}
