@@ -124,4 +124,87 @@ impl ValidationContract {
             request_uri,
         )
     }
+
+    pub fn respond_validation(
+        &mut self,
+        request_id: u64,
+        valid: bool,
+        evidence_hash: String,
+        evidence_uri: String,
+    ) -> u64 {
+        validate_uri(&evidence_uri, true).unwrap_or_else(|e| e.panic());
+        let parsed_hash = if evidence_hash.is_empty() {
+            [0u8; 32]
+        } else {
+            hex_to_bytes32(&evidence_hash).unwrap_or_else(|e| e.panic())
+        };
+
+        let req = self
+            .requests
+            .get_mut(&request_id)
+            .unwrap_or_else(|| Man0Error::ValidationRequestNotFound.panic());
+        man0_require!(
+            req.status != ValidationStatus::Closed,
+            Man0Error::RequestAlreadyClosed
+        );
+        req.status = ValidationStatus::Completed;
+        req.response_count = req.response_count.saturating_add(1);
+
+        let response_id = self.next_response_id;
+        self.next_response_id = self
+            .next_response_id
+            .checked_add(1)
+            .unwrap_or_else(|| Man0Error::ArithmeticOverflow.panic());
+
+        let validator = env::predecessor_account_id();
+        let response = ValidationResponse {
+            response_id,
+            request_id,
+            validator: validator.clone(),
+            valid,
+            evidence_hash: parsed_hash,
+            evidence_uri: evidence_uri.clone(),
+            responded_at: env::block_timestamp(),
+        };
+        self.responses.insert(response_id, response);
+
+        let mut list = self
+            .request_responses
+            .get(&request_id)
+            .cloned()
+            .unwrap_or_default();
+        list.push(response_id);
+        self.request_responses.insert(request_id, list);
+
+        Man0Event::ValidationResponded {
+            response_id,
+            request_id,
+            validator,
+            valid,
+            evidence_uri,
+        }
+        .emit();
+
+        response_id
+    }
+
+    pub fn close_validation(&mut self, request_id: u64) {
+        let req = self
+            .requests
+            .get_mut(&request_id)
+            .unwrap_or_else(|| Man0Error::ValidationRequestNotFound.panic());
+        let caller = env::predecessor_account_id();
+        man0_require!(caller == req.requester, Man0Error::NotRequester);
+        man0_require!(
+            req.status != ValidationStatus::Closed,
+            Man0Error::RequestAlreadyClosed
+        );
+        req.status = ValidationStatus::Closed;
+
+        Man0Event::ValidationClosed {
+            request_id,
+            requester: caller,
+        }
+        .emit();
+    }
 }
