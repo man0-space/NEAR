@@ -207,4 +207,38 @@ impl ValidationContract {
         }
         .emit();
     }
+
+    // =========================================================================
+    // View Methods
+    // =========================================================================
+
+    pub fn get_validation_request(&self, request_id: u64) -> Option<ValidationRequestView> {
+        self.requests.get(&request_id).map(|r| r.to_view())
+    }
+
+    pub fn get_validation_response(&self, response_id: u64) -> Option<ValidationResponseView> {
+        self.responses.get(&response_id).map(|r| r.to_view())
+    }
+
+    pub fn get_agent_validation_requests(&self, agent_id: u64) -> Vec<u64> {
+        self.agent_requests
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_validation_responses(&self, request_id: u64) -> Vec<u64> {
+        self.request_responses
+            .get(&request_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn total_requests(&self) -> u64 {
+        self.next_request_id.saturating_sub(1)
+    }
+
+    pub fn total_responses(&self) -> u64 {
+        self.next_response_id.saturating_sub(1)
+    }
 }
