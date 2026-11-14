@@ -474,4 +474,89 @@ mod tests {
         assert!(contract.get_validation_response(r1).unwrap().valid);
         assert!(!contract.get_validation_response(r2).unwrap().valid);
     }
+
+    #[test]
+    fn test_xcc_on_request_validation_callback_success() {
+        use near_sdk::json_types::{U128, U64};
+        use near_sdk::PromiseResult;
+
+        let admin = acc("admin.testnet");
+        let factory = acc("factory.testnet");
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&admin, 1_000);
+        let mut contract = ValidationContract::new(admin, factory);
+
+        let agent_view = Some(AgentView {
+            agent_id: 1,
+            dna_hash: bytes32_to_hex(&[0x11; 32]),
+            owner: acc("owner.testnet"),
+            creator: acc("owner.testnet"),
+            licenses: 10,
+            licenses_minted: 0,
+            license_price: U128(100),
+            creator_fee: 1,
+            cloneable: false,
+            is_clone: false,
+            parent_agent_id: 0,
+            agent_wallet: "owner.testnet".to_string(),
+            uri: "ipfs://a".to_string(),
+            created_at: U64(1_000),
+        });
+        let payload = serde_json::to_vec(&agent_view).unwrap();
+
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("validation.testnet"))
+            .predecessor_account_id(acc("validation.testnet"))
+            .signer_account_id(alice.clone())
+            .block_timestamp(2_000);
+
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Successful(payload)],
+        );
+
+        let req_id = contract.on_request_validation(
+            1,
+            alice,
+            "TEE".to_string(),
+            [0x77; 32],
+            "ipfs://req-xcc".to_string(),
+        );
+        assert_eq!(req_id, 1);
+        assert_eq!(contract.total_requests(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_AGENT_NOT_FOUND")]
+    fn test_xcc_on_request_validation_missing_agent_panics() {
+        use near_sdk::PromiseResult;
+        let admin = acc("admin.testnet");
+        let factory = acc("factory.testnet");
+        let alice = acc("alice.testnet");
+
+        setup_ctx(&admin, 1_000);
+        let mut contract = ValidationContract::new(admin, factory);
+
+        let payload = serde_json::to_vec(&None::<AgentView>).unwrap();
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(acc("validation.testnet"))
+            .predecessor_account_id(acc("validation.testnet"))
+            .signer_account_id(alice.clone());
+
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Successful(payload)],
+        );
+
+        contract.on_request_validation(999, alice, "TEE".to_string(), [0u8; 32], String::new());
+    }
 }
